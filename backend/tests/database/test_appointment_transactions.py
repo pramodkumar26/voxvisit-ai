@@ -639,6 +639,13 @@ def test_an_appointment_cancelled_since_preparation_is_not_changed_again(auth_en
     )
     other_cancel = prepared(auth_env, session, cancel_body(appointment_id))
     assert confirm(auth_env, session, other_cancel).status_code == 200
+    # Preparing the second review retired the first. Make it live again by hand, to show that the
+    # commit-time check of the appointment does not depend on retirement.
+    with auth_env.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE pending_actions SET status = 'ACTIVE' WHERE pending_action_id = :id"),
+            {"id": pending_id},
+        )
     before = snapshot(auth_env.engine)
 
     response = confirm(auth_env, session, pending_id)
@@ -685,10 +692,10 @@ def test_the_cutoff_boundary_is_exact_in_a_non_utc_clinic_timezone(auth_env) -> 
     one = seed_appointment(auth_env.engine, "PT-1001", first.slots[0])
     two = seed_appointment(auth_env.engine, "PT-1001", second.slots[0])
     pending_one = prepared(auth_env, session, cancel_body(one))
-    pending_two = prepared(auth_env, session, cancel_body(two))
 
     auth_env.clock.advance(minutes=9, seconds=59)  # One second before the start.
     allowed = confirm(auth_env, session, pending_one)
+    pending_two = prepared(auth_env, session, cancel_body(two))  # One review is live at a time.
     auth_env.clock.advance(seconds=1)  # Exactly the start.
     refused = confirm(auth_env, session, pending_two)
 
@@ -935,7 +942,7 @@ def test_successful_and_rejected_attempts_leave_sanitized_audit_events(auth_env)
     )
 
     by_type = {event_type: (result, details) for event_type, result, details in events}
-    assert by_type["APPOINTMENT_ACTION_PREPARED"][1] == {"action": "BOOK"}
+    assert by_type["APPOINTMENT_ACTION_PREPARED"][1] == {"action": "BOOK", "superseded": "0"}
     assert by_type["APPOINTMENT_BOOKED"][0] == "SUCCESS"
     assert by_type["APPOINTMENT_ACTION_REJECTED"] == (
         "DENIED",

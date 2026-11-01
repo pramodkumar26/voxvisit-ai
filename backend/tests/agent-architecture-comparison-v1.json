@@ -1,0 +1,42 @@
+{
+  "version": "agent-architecture-comparison-v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "seeds": [7, 19],
+  "scenarios": [
+    {
+      "id": "AB-BOOK",
+      "title": "Clear earliest booking",
+      "request": "Schedule the soonest visit at {clinic_name} on {day}.",
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "BOOKED"
+    },
+    {
+      "id": "AB-AMBIGUITY",
+      "title": "Ambiguous doctor requires clarification",
+      "request": "I need to move my appointment with Dr. {doctor_term} at {clinic_name}.",
+      "expected_tools": ["search_clinic_directory"],
+      "expected_outcome": "CLARIFICATION_WITHOUT_MUTATION"
+    },
+    {
+      "id": "AB-CANCEL",
+      "title": "Cancel a uniquely identified appointment",
+      "request": "Cancel my visit at {clinic_name} on {day}.",
+      "expected_tools": ["get_my_appointments", "prepare_appointment_action"],
+      "expected_outcome": "CANCELLED"
+    },
+    {
+      "id": "AB-RESCHEDULE",
+      "title": "Reschedule to the next available time",
+      "request": "Move my {day} visit at {clinic_name} to the next available time that day.",
+      "expected_tools": ["get_my_appointments", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "RESCHEDULED"
+    },
+    {
+      "id": "AB-STALE",
+      "title": "Selected slot becomes unavailable before confirmation",
+      "request": "Schedule the soonest visit at {clinic_name} on {day}.",
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "SLOT_UNAVAILABLE_WITHOUT_WRONG_BOOKING"
+    }
+  ]
+}

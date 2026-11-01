@@ -1,22 +1,80 @@
-.DS_Store
+# --- Secrets and local configuration -------------------------------------------------------
 .env
 .env.*
 !.env.example
+!.env.sample
+!.env.template
+*.pem
+*.p12
+*.pfx
+id_rsa*
+service-account*.json
+credentials.json
+*-credentials.json
 
+# --- macOS and editors ---------------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# --- Python: environments, bytecode, caches ------------------------------------------------
 .venv/
 .uv-cache/
 __pycache__/
 *.py[cod]
-
+*.egg-info/
+.eggs/
+build/
+dist/
 .pytest_cache/
 .ruff_cache/
-.coverage
-htmlcov/
+.mypy_cache/
+.cache/
 
+# --- Tests: coverage and reports -----------------------------------------------------------
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+test-results/
+junit.xml
+
+# --- Logs and local databases --------------------------------------------------------------
 *.log
 *.db
+*.db-journal
 *.sqlite
+*.sqlite3
 postgres-data/
 
-.idea/
-.vscode/
+# --- Node.js, Next.js and Vercel (when a frontend exists) ----------------------------------
+node_modules/
+.next/
+.vercel/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+
+# --- Evaluation outputs that hold raw conversation text (synthetic, but never published) ---
+# Local-only working files: benchmark transcripts, review sheets and run logs.
+.local/
+# If a run is pointed anywhere else, these names are the raw outputs the evaluation tools write.
+# (`docs/benchmark/`, `backend/benchmark-runs/` and `benchmark-runs/` are deliberately NOT
+# ignored: a test requires the tools to refuse them as output directories.)
+smoke-raw.json
+acceptance-raw.json
+raw-?.json
+partial-raw.jsonl
+partial-scores.jsonl
+review-sheet.md
+review-key.json
+review-judgments*.json
+
+# --- Local audio recordings used during development ----------------------------------------
+# Only these directories: audio test fixtures elsewhere stay trackable.
+recordings/
+local-audio/

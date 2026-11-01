@@ -5,6 +5,17 @@ from datetime import UTC, datetime
 from typing import Any
 
 REDACTED = "[REDACTED]"
+# The only structured fields a log record may carry. Agent tool traces use the last five; they
+# hold names, durations, and categories, never arguments, results, identities, or credentials.
+TRACE_FIELDS = (
+    "error_type",
+    "request_id",
+    "tool",
+    "duration_ms",
+    "outcome",
+    "error_category",
+    "attempts",
+)
 SENSITIVE_KEYS = {
     "authorization",
     "cookie",
@@ -60,7 +71,7 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("error_type", "request_id"):
+        for key in TRACE_FIELDS:
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         return json.dumps(redact_sensitive(payload), separators=(",", ":"))

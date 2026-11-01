@@ -6,6 +6,9 @@ it only reads appointments and slots. It imports no INSERT/UPDATE/DELETE constru
 history, or outbox models, and nothing from appointment_transactions: committing is a separate
 operation that only the authenticated UI can reach (a test enforces this boundary).
 
+A newer preparation retires the session's other ACTIVE pending actions in the same transaction
+(see pending_action_retirement), so a review screen the patient has moved on from cannot commit.
+
 The creation time and expiry are both taken from the database clock in one statement, so neither
 the application server nor the browser can influence them.
 """
@@ -45,6 +48,7 @@ from app.services.action_support import (
     slot_details,
 )
 from app.services.availability import is_slot_bookable
+from app.services.pending_action_retirement import retire_active_pending_actions
 from app.services.write_access import write_transaction
 
 __all__ = ["prepare_appointment_action"]
@@ -94,6 +98,9 @@ def prepare_appointment_action(
             return view, True
 
         prepared = _validate(connection, principal, request, now)
+        # Under the session lock taken above, and in this transaction: a confirmation of an
+        # earlier review either commits before this point or finds it INVALIDATED.
+        superseded = retire_active_pending_actions(connection, principal.session_id, now)
         created = connection.execute(
             _INSERT,
             {
@@ -129,7 +136,7 @@ def prepare_appointment_action(
             request_id=request_id,
             resource_type="PENDING_ACTION",
             resource_id=created.pending_action_id,
-            details={"action": request.action},
+            details={"action": request.action, "superseded": str(superseded)},
         )
         return view, False
 

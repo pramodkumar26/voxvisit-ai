@@ -1,0 +1,2615 @@
+{
+  "version": "agent-architecture-benchmark-v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "frozen_on": "2026-11-01",
+  "protocol": "docs/agent-architecture-evaluation-protocol.md",
+  "purpose": "Independent comparison of the free-form agent (Approach A) and the intent-extraction plus deterministic-controller agent (Approach B) on identical requests and identical initial states.",
+  "rules": {
+    "synthetic_data_only": true,
+    "used_for_prompt_or_schema_tuning": false,
+    "approach_specific_expectations": false,
+    "contains_tool_names_or_call_orders": false,
+    "patient_follow_up_replies": false
+  },
+  "development_evidence": [
+    "agent-reliability-holdout-v1 (HR-001..HR-010)",
+    "agent-architecture-comparison-v1 (AB-*)",
+    "EV-001, EV-002, EV-006, EV-008, EV-016"
+  ],
+  "scenarios": [
+    {
+      "id": "BM-001",
+      "category": "BOOKING",
+      "title": "Earliest opening across two doctors",
+      "actor": "patient",
+      "request": "Hi, could you get me in at {clinic} on {day}? Whatever is earliest works for me.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "polite_question",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 14
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Maple Terrace Family Clinic",
+            "doctors": [
+              {
+                "key": "adams",
+                "name": "Dr. Maya Adams",
+                "specialty": "Family Medicine"
+              },
+              {
+                "key": "baker",
+                "name": "Dr. Omar Baker",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "adams",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "adams",
+            "day": "d1",
+            "time": "10:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "baker",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "baker",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "BOOKED",
+        "prepared": {
+          "action": "BOOK",
+          "slot": "s3"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "booked_by_patient": [
+            "s3"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-002",
+      "category": "BOOKING",
+      "title": "Named doctor, first opening, earlier slot belongs to a colleague",
+      "actor": "patient",
+      "request": "I'd like to book with Dr. {surname} at {clinic} on {day_long}, the first opening you have.",
+      "stated": {
+        "clinic": "c1",
+        "doctor": "nair",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "formal_request",
+        "date_format": "long"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 15
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Cedar Hollow Heart Center",
+            "doctors": [
+              {
+                "key": "nair",
+                "name": "Dr. Priya Nair",
+                "specialty": "Cardiology"
+              },
+              {
+                "key": "oyelaran",
+                "name": "Dr. Tobias Oyelaran",
+                "specialty": "Cardiology"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "nair",
+            "day": "d1",
+            "time": "11:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "nair",
+            "day": "d1",
+            "time": "11:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "oyelaran",
+            "day": "d1",
+            "time": "08:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "oyelaran",
+            "day": "d1",
+            "time": "14:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "doctor": "nair",
+        "day": "d1",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "BOOKED",
+        "prepared": {
+          "action": "BOOK",
+          "slot": "s1"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "booked_by_patient": [
+            "s1"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-003",
+      "category": "BOOKING",
+      "title": "Specialty with an afternoon preference",
+      "actor": "patient",
+      "request": "I need a {specialty} appointment at {clinic} on {day_dmy}, afternoon only please.",
+      "stated": {
+        "clinic": "c1",
+        "specialty": "Dermatology",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "first_person_need",
+        "date_format": "dmy"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 18
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Lakeview Skin and Family Care",
+            "doctors": [
+              {
+                "key": "chen",
+                "name": "Dr. Wei Chen",
+                "specialty": "Dermatology"
+              },
+              {
+                "key": "diaz",
+                "name": "Dr. Elena Diaz",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "chen",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "chen",
+            "day": "d1",
+            "time": "13:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "chen",
+            "day": "d1",
+            "time": "15:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "diaz",
+            "day": "d1",
+            "time": "12:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s5",
+            "clinic": "c1",
+            "doctor": "diaz",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "specialty": "Dermatology",
+        "day": "d1",
+        "time_preference": "AFTERNOON",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "BOOKED",
+        "prepared": {
+          "action": "BOOK",
+          "slot": "s2"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "booked_by_patient": [
+            "s2"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s2"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s2"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-004",
+      "category": "BOOKING",
+      "title": "A specific time, terse lowercase request",
+      "actor": "patient",
+      "request": "can you book the {time} slot at {clinic} on {day}",
+      "stated": {
+        "clinic": "c1",
+        "time": "10:30",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "lowercase_terse",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 21
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Pinecrest Internal Medicine",
+            "doctors": [
+              {
+                "key": "rossi",
+                "name": "Dr. Marco Rossi",
+                "specialty": "Internal Medicine"
+              },
+              {
+                "key": "sorensen",
+                "name": "Dr. Ingrid Sorensen",
+                "specialty": "Internal Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "rossi",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "rossi",
+            "day": "d1",
+            "time": "10:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "rossi",
+            "day": "d1",
+            "time": "11:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "sorensen",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s5",
+            "clinic": "c1",
+            "doctor": "sorensen",
+            "day": "d1",
+            "time": "13:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "SPECIFIC_TIME",
+        "time": "10:30"
+      },
+      "expected": {
+        "outcome": "BOOKED",
+        "prepared": {
+          "action": "BOOK",
+          "slot": "s2"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "booked_by_patient": [
+            "s2"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s2"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s2"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-005",
+      "category": "BOOKING",
+      "title": "A clinic whose name is contained in another clinic's name",
+      "actor": "patient",
+      "request": "My knee has been bothering me for a week. Please book the first appointment you have at {clinic} on {day}.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "context_first",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 22
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Harborgate Community Clinic",
+            "doctors": [
+              {
+                "key": "tan",
+                "name": "Dr. Grace Tan",
+                "specialty": "Family Medicine"
+              }
+            ]
+          },
+          {
+            "key": "c2",
+            "name": "Harborgate Community Clinic West",
+            "doctors": [
+              {
+                "key": "cole",
+                "name": "Dr. Henry Cole",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "tan",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "tan",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c2",
+            "doctor": "cole",
+            "day": "d1",
+            "time": "08:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c2",
+            "doctor": "cole",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "BOOKED",
+        "prepared": {
+          "action": "BOOK",
+          "slot": "s1"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "booked_by_patient": [
+            "s1"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-006",
+      "category": "CONFLICT",
+      "title": "The prepared slot is taken before the patient confirms",
+      "actor": "patient",
+      "request": "Please make me an appointment at {clinic} for {day_long}, the soonest one available.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "imperative_polite",
+        "date_format": "long"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 10
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Maplewood Primary Care",
+            "doctors": [
+              {
+                "key": "patel",
+                "name": "Dr. Sam Patel",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "patel",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "patel",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "EARLIEST"
+      },
+      "world": [
+        {
+          "when": "after_prepare",
+          "event": "other_patient_books",
+          "slot": "s1"
+        }
+      ],
+      "expected": {
+        "outcome": "CONFLICT",
+        "prepared": {
+          "action": "BOOK",
+          "slot": "s1"
+        },
+        "ui": "SLOT_UNAVAILABLE",
+        "final": {
+          "booked_by_other": [
+            "s1"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "CONFLICT_REPORT",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [
+            [
+              "not",
+              "couldn't",
+              "could not",
+              "unable",
+              "no longer",
+              "taken",
+              "unavailable",
+              "isn't",
+              "wasn't"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-007",
+      "category": "CANCELLATION",
+      "title": "Cancel the appointment on a named date",
+      "actor": "patient",
+      "request": "I need to cancel my appointment at {clinic} on {day}, thanks.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "courtesy_close",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 9,
+          "d2": 16
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Summit Ridge Orthopedics",
+            "doctors": [
+              {
+                "key": "ibarra",
+                "name": "Dr. Hannah Ibarra",
+                "specialty": "Orthopedics"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "ibarra",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "ibarra",
+            "day": "d2",
+            "time": "10:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "ibarra",
+            "day": "d1",
+            "time": "11:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "CANCEL",
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "expected": {
+        "outcome": "CANCELLED",
+        "prepared": {
+          "action": "CANCEL",
+          "appointment": "s1"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "released": [
+            "s1"
+          ],
+          "cancelled_appointments": [
+            "s1"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-008",
+      "category": "CANCELLATION",
+      "title": "Cancel by doctor when two appointments share a day",
+      "actor": "patient",
+      "request": "Something came up, so I can't make it to see Dr. {surname} at {clinic} on {day_long}. Please cancel that one.",
+      "stated": {
+        "clinic": "c1",
+        "doctor": "hall",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "reason_given",
+        "date_format": "long"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 11
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Willow Creek Medical Group",
+            "doctors": [
+              {
+                "key": "hall",
+                "name": "Dr. Jamal Hall",
+                "specialty": "Family Medicine"
+              },
+              {
+                "key": "kim",
+                "name": "Dr. Soo-jin Kim",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "hall",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "kim",
+            "day": "d1",
+            "time": "13:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "hall",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "kim",
+            "day": "d1",
+            "time": "14:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "CANCEL",
+        "clinic": "c1",
+        "doctor": "hall",
+        "day": "d1"
+      },
+      "expected": {
+        "outcome": "CANCELLED",
+        "prepared": {
+          "action": "CANCEL",
+          "appointment": "s1"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "released": [
+            "s1"
+          ],
+          "cancelled_appointments": [
+            "s1"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-009",
+      "category": "CANCELLATION",
+      "title": "No active appointment on the named date",
+      "actor": "patient",
+      "request": "I'd like to cancel my appointment at {clinic} on {day}.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "polite_statement",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 8,
+          "d2": 14
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Foxglove Women's Health",
+            "doctors": [
+              {
+                "key": "mendez",
+                "name": "Dr. Rosa Mendez",
+                "specialty": "Women's Health"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "mendez",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "patient_cancelled"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "mendez",
+            "day": "d2",
+            "time": "10:00",
+            "held_by": "patient"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "CANCEL",
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "expected": {
+        "outcome": "NO_MATCH",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "NO_MATCH",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "no ",
+              "not",
+              "don't",
+              "couldn't",
+              "can't",
+              "cannot",
+              "unable",
+              "isn't"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-010",
+      "category": "CANCELLATION",
+      "title": "Cancel by date alone, with no clinic named",
+      "actor": "patient",
+      "request": "Um, I can't come in on {day} anymore. Could you cancel it for me?",
+      "stated": {
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "hesitation",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 7,
+          "d2": 14
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Bluebird Walk-In Clinic",
+            "doctors": [
+              {
+                "key": "alvarez",
+                "name": "Dr. Victor Alvarez",
+                "specialty": "Family Medicine"
+              }
+            ]
+          },
+          {
+            "key": "c2",
+            "name": "Aspen Grove Clinic",
+            "doctors": [
+              {
+                "key": "novak",
+                "name": "Dr. Leo Novak",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "alvarez",
+            "day": "d1",
+            "time": "15:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c2",
+            "doctor": "novak",
+            "day": "d2",
+            "time": "09:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "alvarez",
+            "day": "d1",
+            "time": "15:30",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "CANCEL",
+        "day": "d1"
+      },
+      "expected": {
+        "outcome": "CANCELLED",
+        "prepared": {
+          "action": "CANCEL",
+          "appointment": "s1"
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "released": [
+            "s1"
+          ],
+          "cancelled_appointments": [
+            "s1"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-011",
+      "category": "RESCHEDULING",
+      "title": "Move to a later time on the same day",
+      "actor": "patient",
+      "request": "Could you move my visit at {clinic} on {day} to a later time that same day?",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "polite_question",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 15
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Juniper Family Practice",
+            "doctors": [
+              {
+                "key": "shah",
+                "name": "Dr. Aaron Shah",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "shah",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "shah",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "other"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "shah",
+            "day": "d1",
+            "time": "10:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "shah",
+            "day": "d1",
+            "time": "11:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s5",
+            "clinic": "c1",
+            "doctor": "shah",
+            "day": "d1",
+            "time": "08:30",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "RESCHEDULE",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "LATER"
+      },
+      "expected": {
+        "outcome": "RESCHEDULED",
+        "prepared": {
+          "action": "RESCHEDULE",
+          "appointment": "s1",
+          "new_slot": "s3",
+          "acceptable_new_slots": [
+            "s3",
+            "s4"
+          ]
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "released": [
+            "s1"
+          ],
+          "booked_by_patient": [
+            "s3"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1",
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1",
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-012",
+      "category": "RESCHEDULING",
+      "title": "Move to a morning on a different date",
+      "actor": "patient",
+      "request": "I need to change my appointment at {clinic} from {day_long} to {day2_long}. Any morning time is fine.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1",
+        "day2": "d2"
+      },
+      "strata": {
+        "phrasing": "first_person_need",
+        "date_format": "long"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 10,
+          "d2": 17
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Copperfield Medical Center",
+            "doctors": [
+              {
+                "key": "wu",
+                "name": "Dr. Lucia Wu",
+                "specialty": "Internal Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "wu",
+            "day": "d1",
+            "time": "14:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "wu",
+            "day": "d2",
+            "time": "08:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "wu",
+            "day": "d2",
+            "time": "09:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "wu",
+            "day": "d2",
+            "time": "13:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "RESCHEDULE",
+        "clinic": "c1",
+        "day": "d1",
+        "new_day": "d2",
+        "time_preference": "MORNING",
+        "selection": "ANY"
+      },
+      "expected": {
+        "outcome": "RESCHEDULED",
+        "prepared": {
+          "action": "RESCHEDULE",
+          "appointment": "s1",
+          "new_slot": "s2",
+          "acceptable_new_slots": [
+            "s2",
+            "s3"
+          ]
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "released": [
+            "s1"
+          ],
+          "booked_by_patient": [
+            "s2"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1",
+            "s2"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1",
+            "s2"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-013",
+      "category": "RESCHEDULING",
+      "title": "Move to the afternoon of the same day, lowercase",
+      "actor": "patient",
+      "request": "hey can you push my {day_dmy} appointment at {clinic} to the afternoon",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "lowercase_terse",
+        "date_format": "dmy"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 22
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Stonebridge Wellness Clinic",
+            "doctors": [
+              {
+                "key": "rahman",
+                "name": "Dr. Fatima Rahman",
+                "specialty": "Internal Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "rahman",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "rahman",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "rahman",
+            "day": "d1",
+            "time": "13:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "rahman",
+            "day": "d1",
+            "time": "15:30",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "RESCHEDULE",
+        "clinic": "c1",
+        "day": "d1",
+        "time_preference": "AFTERNOON",
+        "selection": "ANY"
+      },
+      "expected": {
+        "outcome": "RESCHEDULED",
+        "prepared": {
+          "action": "RESCHEDULE",
+          "appointment": "s1",
+          "new_slot": "s3",
+          "acceptable_new_slots": [
+            "s3",
+            "s4"
+          ]
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "released": [
+            "s1"
+          ],
+          "booked_by_patient": [
+            "s3"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1",
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1",
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-014",
+      "category": "RESCHEDULING",
+      "title": "Move one of two appointments to an earlier time",
+      "actor": "patient",
+      "request": "I would like to reschedule my appointment at {clinic} on {day} to an earlier time on that same day, if possible.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "formal_request",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 16,
+          "d2": 15
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Meadowlark Health Partners",
+            "doctors": [
+              {
+                "key": "haddad",
+                "name": "Dr. Yara Haddad",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "haddad",
+            "day": "d1",
+            "time": "14:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "haddad",
+            "day": "d2",
+            "time": "14:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "haddad",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c1",
+            "doctor": "haddad",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s5",
+            "clinic": "c1",
+            "doctor": "haddad",
+            "day": "d1",
+            "time": "15:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s6",
+            "clinic": "c1",
+            "doctor": "haddad",
+            "day": "d2",
+            "time": "09:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "RESCHEDULE",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "EARLIER"
+      },
+      "expected": {
+        "outcome": "RESCHEDULED",
+        "prepared": {
+          "action": "RESCHEDULE",
+          "appointment": "s1",
+          "new_slot": "s3",
+          "acceptable_new_slots": [
+            "s3",
+            "s4"
+          ]
+        },
+        "ui": "COMMITTED",
+        "final": {
+          "released": [
+            "s1"
+          ],
+          "booked_by_patient": [
+            "s3"
+          ]
+        }
+      },
+      "responses": {
+        "review": {
+          "kind": "REVIEW_PROMPT",
+          "subject": [
+            "s1",
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        },
+        "final": {
+          "kind": "COMMITTED",
+          "subject": [
+            "s1",
+            "s3"
+          ],
+          "options": [],
+          "must_cover": [],
+          "required_details": [
+            "doctor",
+            "time"
+          ]
+        }
+      }
+    },
+    {
+      "id": "BM-015",
+      "category": "NO_AVAILABILITY",
+      "title": "Nothing open on the requested day",
+      "actor": "patient",
+      "request": "Is there anything open at {clinic} on {day}? If so, book whatever comes first.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "conditional_question",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 14,
+          "d2": 15
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Birchwood Family Clinic",
+            "doctors": [
+              {
+                "key": "moore",
+                "name": "Dr. Ethan Moore",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "moore",
+            "day": "d2",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "moore",
+            "day": "d2",
+            "time": "10:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "NO_AVAILABILITY",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "NO_AVAILABILITY",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "no ",
+              "not",
+              "none",
+              "nothing",
+              "n't",
+              "unavailable",
+              "fully booked",
+              "don't",
+              "cannot"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-016",
+      "category": "NO_AVAILABILITY",
+      "title": "The named doctor is not free but a colleague is",
+      "actor": "patient",
+      "request": "Book me with Dr. {surname} at {clinic} on {day_long}, and if that doctor isn't free that day, please don't book anyone else.",
+      "stated": {
+        "clinic": "c1",
+        "doctor": "reyes",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "conditional_instruction",
+        "date_format": "long"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 11,
+          "d2": 14
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Silverton Medical Associates",
+            "doctors": [
+              {
+                "key": "reyes",
+                "name": "Dr. Camila Reyes",
+                "specialty": "Family Medicine"
+              },
+              {
+                "key": "bishop",
+                "name": "Dr. Andre Bishop",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "reyes",
+            "day": "d2",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "bishop",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "bishop",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "doctor": "reyes",
+        "day": "d1",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "NO_AVAILABILITY",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "NO_AVAILABILITY",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "no ",
+              "not",
+              "none",
+              "nothing",
+              "n't",
+              "unavailable",
+              "fully booked",
+              "don't",
+              "cannot"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-017",
+      "category": "NO_AVAILABILITY",
+      "title": "A specialty with only afternoon times when the morning is requested",
+      "actor": "patient",
+      "request": "Do you have a {specialty} appointment at {clinic} on {day_dmy} in the morning? Book it if you do.",
+      "stated": {
+        "clinic": "c1",
+        "specialty": "Neurology",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "conditional_question",
+        "date_format": "dmy"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 16
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Redwood Specialty Clinic",
+            "doctors": [
+              {
+                "key": "roy",
+                "name": "Dr. Camille Roy",
+                "specialty": "Neurology"
+              },
+              {
+                "key": "lopez",
+                "name": "Dr. Mateo Lopez",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "roy",
+            "day": "d1",
+            "time": "13:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "roy",
+            "day": "d1",
+            "time": "14:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "lopez",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "specialty": "Neurology",
+        "day": "d1",
+        "time_preference": "MORNING",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "NO_AVAILABILITY",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "NO_AVAILABILITY",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "no ",
+              "not",
+              "none",
+              "nothing",
+              "n't",
+              "unavailable",
+              "fully booked",
+              "don't",
+              "cannot"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-018",
+      "category": "AMBIGUITY",
+      "title": "Two doctors share the surname",
+      "actor": "patient",
+      "request": "I want to see Dr. {surname} at {clinic} on {day}, first slot please.",
+      "stated": {
+        "clinic": "c1",
+        "doctor": "npark",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "first_person_want",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 15
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Brookside Medical Center",
+            "doctors": [
+              {
+                "key": "npark",
+                "name": "Dr. Nina Park",
+                "specialty": "Family Medicine"
+              },
+              {
+                "key": "dpark",
+                "name": "Dr. David Park",
+                "specialty": "Internal Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "npark",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "npark",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "dpark",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "EARLIEST",
+        "ambiguity": "DOCTOR_NAME",
+        "options": [
+          "npark",
+          "dpark"
+        ]
+      },
+      "expected": {
+        "outcome": "CLARIFICATION",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "CLARIFICATION",
+          "subject": [],
+          "options": [
+            "npark",
+            "dpark"
+          ],
+          "must_cover": [
+            [
+              "which",
+              "who",
+              "?"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-019",
+      "category": "AMBIGUITY",
+      "title": "Cancel, but there are two appointments and no date",
+      "actor": "patient",
+      "request": "please cancel my appointment at {clinic}",
+      "stated": {
+        "clinic": "c1"
+      },
+      "strata": {
+        "phrasing": "lowercase_terse",
+        "date_format": "none"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 9,
+          "d2": 16
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Granite Falls Clinic",
+            "doctors": [
+              {
+                "key": "okoro",
+                "name": "Dr. Chidi Okoro",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "okoro",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "okoro",
+            "day": "d2",
+            "time": "14:00",
+            "held_by": "patient"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "CANCEL",
+        "clinic": "c1",
+        "ambiguity": "APPOINTMENT_TARGET",
+        "options": [
+          "s1",
+          "s2"
+        ]
+      },
+      "expected": {
+        "outcome": "CLARIFICATION",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "CLARIFICATION",
+          "subject": [],
+          "options": [
+            "s1",
+            "s2"
+          ],
+          "must_cover": [
+            [
+              "which",
+              "?"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-020",
+      "category": "AMBIGUITY",
+      "title": "A booking request that names no date",
+      "actor": "patient",
+      "request": "I need an appointment at {clinic} sometime soon. What do you have?",
+      "stated": {
+        "clinic": "c1"
+      },
+      "strata": {
+        "phrasing": "first_person_need",
+        "date_format": "none"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 15
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Sunrise Valley Clinic",
+            "doctors": [
+              {
+                "key": "soto",
+                "name": "Dr. Marisol Soto",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "soto",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "soto",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "selection": "UNSPECIFIED",
+        "ambiguity": "MISSING_DATE"
+      },
+      "expected": {
+        "outcome": "CLARIFICATION",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "CLARIFICATION",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "date",
+              "day",
+              "when",
+              "week",
+              "range"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-021",
+      "category": "AMBIGUITY",
+      "title": "Two appointments on the same day at different clinics",
+      "actor": "patient",
+      "request": "Uh, can you move my appointment on {day} to a bit later?",
+      "stated": {
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "hesitation",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 8
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Elmhurst Health Center",
+            "doctors": [
+              {
+                "key": "kapoor",
+                "name": "Dr. Anika Kapoor",
+                "specialty": "Family Medicine"
+              }
+            ]
+          },
+          {
+            "key": "c2",
+            "name": "Prairie Wind Clinic",
+            "doctors": [
+              {
+                "key": "wolfe",
+                "name": "Dr. Gideon Wolfe",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "kapoor",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c2",
+            "doctor": "wolfe",
+            "day": "d1",
+            "time": "14:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "kapoor",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s4",
+            "clinic": "c2",
+            "doctor": "wolfe",
+            "day": "d1",
+            "time": "15:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "RESCHEDULE",
+        "day": "d1",
+        "selection": "LATER",
+        "ambiguity": "APPOINTMENT_TARGET",
+        "options": [
+          "s1",
+          "s2"
+        ]
+      },
+      "expected": {
+        "outcome": "CLARIFICATION",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "CLARIFICATION",
+          "subject": [],
+          "options": [
+            "s1",
+            "s2"
+          ],
+          "must_cover": [
+            [
+              "which",
+              "?"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-022",
+      "category": "UNAUTHENTICATED",
+      "title": "Booking without signing in",
+      "actor": "public",
+      "request": "I'd like the earliest slot you have at {clinic} on {day}; please book it for me.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "first_person_want",
+        "date_format": "iso"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 14
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Oakdale Community Clinic",
+            "doctors": [
+              {
+                "key": "dubois",
+                "name": "Dr. Henri Dubois",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "dubois",
+            "day": "d1",
+            "time": "09:00",
+            "held_by": "none"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "dubois",
+            "day": "d1",
+            "time": "09:30",
+            "held_by": "none"
+          },
+          {
+            "key": "s3",
+            "clinic": "c1",
+            "doctor": "dubois",
+            "day": "d1",
+            "time": "11:00",
+            "held_by": "patient"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "BOOK",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "EARLIEST"
+      },
+      "expected": {
+        "outcome": "AUTH_REQUIRED",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "AUTH_REQUIRED",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "sign in",
+              "sign-in",
+              "log in",
+              "login",
+              "verify",
+              "verification",
+              "identity"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-023",
+      "category": "UNAUTHENTICATED",
+      "title": "Cancelling without signing in, with a real appointment to protect",
+      "actor": "public",
+      "request": "Please cancel my {day_long} appointment at {clinic}; I can no longer make it.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "polite_statement",
+        "date_format": "long"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 9
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Thistle Creek Clinic",
+            "doctors": [
+              {
+                "key": "lang",
+                "name": "Dr. Beatrix Lang",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "lang",
+            "day": "d1",
+            "time": "10:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "lang",
+            "day": "d1",
+            "time": "11:00",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "CANCEL",
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "expected": {
+        "outcome": "AUTH_REQUIRED",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "AUTH_REQUIRED",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "sign in",
+              "sign-in",
+              "log in",
+              "login",
+              "verify",
+              "verification",
+              "identity"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    },
+    {
+      "id": "BM-024",
+      "category": "UNAUTHENTICATED",
+      "title": "Rescheduling without signing in",
+      "actor": "public",
+      "request": "Move my appointment on {day_dmy} at {clinic} to a later time, please.",
+      "stated": {
+        "clinic": "c1",
+        "day": "d1"
+      },
+      "strata": {
+        "phrasing": "polite_statement",
+        "date_format": "dmy"
+      },
+      "fixture": {
+        "timezone": "America/Denver",
+        "days": {
+          "d1": 17
+        },
+        "clinics": [
+          {
+            "key": "c1",
+            "name": "Ironwood Family Medicine",
+            "doctors": [
+              {
+                "key": "moreau",
+                "name": "Dr. Felix Moreau",
+                "specialty": "Family Medicine"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "key": "s1",
+            "clinic": "c1",
+            "doctor": "moreau",
+            "day": "d1",
+            "time": "11:00",
+            "held_by": "patient"
+          },
+          {
+            "key": "s2",
+            "clinic": "c1",
+            "doctor": "moreau",
+            "day": "d1",
+            "time": "12:30",
+            "held_by": "none"
+          }
+        ]
+      },
+      "intent": {
+        "operation": "RESCHEDULE",
+        "clinic": "c1",
+        "day": "d1",
+        "selection": "LATER"
+      },
+      "expected": {
+        "outcome": "AUTH_REQUIRED",
+        "ui": "NOT_REACHED",
+        "final": {}
+      },
+      "responses": {
+        "final": {
+          "kind": "AUTH_REQUIRED",
+          "subject": [],
+          "options": [],
+          "must_cover": [
+            [
+              "sign in",
+              "sign-in",
+              "log in",
+              "login",
+              "verify",
+              "verification",
+              "identity"
+            ]
+          ],
+          "required_details": []
+        }
+      }
+    }
+  ]
+}

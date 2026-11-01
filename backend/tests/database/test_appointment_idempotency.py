@@ -233,9 +233,9 @@ def test_reusing_a_confirmation_key_for_a_different_pending_action_is_rejected(a
     scenario = world(auth_env.engine, count=2)
     session = patient_session(auth_env)
     first_pending = prepared(auth_env, session, book_body(scenario.slots[0]))
-    second_pending = prepared(auth_env, session, book_body(scenario.slots[1]))
     shared_key = key()
     assert confirm(auth_env, session, first_pending, key=shared_key).status_code == 200
+    second_pending = prepared(auth_env, session, book_body(scenario.slots[1]))
     before = snapshot(auth_env.engine)
 
     response = confirm(auth_env, session, second_pending, key=shared_key)

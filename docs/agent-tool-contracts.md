@@ -74,7 +74,7 @@ Responses contain no raw SQL errors, stack traces, internal table names, credent
 
 An error may also carry an optional `reason`: a stable, machine-readable refinement of its `code`, for example `CONFIRMATION_EXPIRED` under `CONFLICT`. The reasons in use are listed after the error taxonomy. A reason never reveals protected data.
 
-The FastAPI endpoints behind the tools return plain response models and the shared error body `{"error": {"code", "message", "reason"?}}` with the HTTP status for the code. An empty result is a normal `200` with empty lists. The tool runtime wraps these into the envelope above, generates `request_id` and idempotency keys, and maps empty results to `NO_RESULTS` or `NO_AVAILABILITY` and multiple matches to `AMBIGUOUS_MATCH`. That runtime is not yet implemented.
+The FastAPI endpoints behind the tools return plain response models and the shared error body `{"error": {"code", "message", "reason"?}}` with the HTTP status for the code. An empty result is a normal `200` with empty lists. The tool runtime (`app/agent_tools`) wraps these into the envelope above, generates `request_id` and idempotency keys, and maps empty results to `NO_RESULTS` or `NO_AVAILABILITY` and multiple matches to `AMBIGUOUS_MATCH`. It currently implements `search_clinic_directory`, `search_appointment_availability`, `get_my_appointments`, and `prepare_appointment_action`; the remaining tools are not registered. See "Tool runtime implementation" below.
 
 ## Tool Contracts
 
@@ -165,6 +165,7 @@ Illustrative request and response:
 - Response: Pending action ID, action type, stored status `ACTIVE`, UI label `AWAITING_UI_CONFIRMATION`, exact display summary, creation time, 10-minute `expires_at`, and `confirmation_required: true`. Internal expected versions remain server-side. They record the version of every record the action depends on: the slot to be booked (`BOOK`); the appointment, the slot being released, and the replacement slot (`RESCHEDULE`); the appointment and its slot (`CANCEL`).
 - Authorization: Patient identity and ownership come only from the session. Public and staff sessions are rejected. A pending action is bound to the session that prepared it.
 - Mode and side effects: Creates or returns an idempotent `pending_actions` record only. It does not create, move, cancel, hold, or reserve an appointment or slot.
+- One live review per session: storing a new pending action retires (status `INVALIDATED`) every other `ACTIVE` pending action of the same session, in the same transaction and under the session row lock that confirmation also takes. A review screen the patient has moved on from therefore cannot commit: confirming it fails with `CONFLICT` (reason `CONFIRMATION_INVALIDATED`). A committed action keeps its status; other sessions are never touched; an idempotent replay and a failed preparation retire nothing. Trusted application code (never a tool) can also discard one named pending action of its own session when a patient drops a request.
 - Idempotency: The runtime supplies an idempotency key. Retrying the same preparation with the same normalized arguments returns the original pending action. Reusing the key with different arguments fails with `CONFLICT` (reason `IDEMPOTENCY_KEY_REUSED`). A replay is served only after the session and account are re-verified, and only to the session that owns the pending action: another session or patient receives `RESOURCE_NOT_AVAILABLE` and nothing from the stored result.
 - Errors: `AUTH_REQUIRED`, `SESSION_EXPIRED`, `INVALID_ARGUMENT`, `RESOURCE_NOT_AVAILABLE`, `SLOT_UNAVAILABLE`, `SELF_SERVICE_CUTOFF`, `CONFLICT`, `RATE_LIMITED`, `DEPENDENCY_UNAVAILABLE`.
 - Safe message example: "That appointment change cannot be prepared. Please review the current appointment details."
@@ -348,6 +349,21 @@ Pending confirmation lasts at most 10 minutes and never reserves a slot. Offer a
 | `RATE_LIMITED` | Request limits were reached | Retry only after the supplied delay |
 | `DEPENDENCY_UNAVAILABLE` | A required service timed out or failed | Retry according to tool policy |
 | `INTERNAL_ERROR` | Unexpected safe failure | Do not expose internals or claim success |
+
+### Tool runtime implementation
+
+The runtime is the only surface the agent may call, and it is built so the agent cannot exceed the contract:
+
+- **Allowlist.** A registry holds exactly the implemented tools. A tool can be registered only if its name is on a fixed allowlist, its name does not denote confirming or committing, and its handler lives in the tool package. Any other name, including every confirmation or commit name, gets one identical response: `INVALID_ARGUMENT` with reason `UNKNOWN_TOOL`. The tool package imports neither the commit service nor the confirmation route, and tests enforce that.
+- **Trusted context.** The verified session, `request_id`, idempotency key, and clock come from the runtime. The model-visible argument models contain only the documented fields and reject unknown ones, so a patient id, role, session or CSRF token, idempotency key, page size, or confirmation flag in the arguments is an `INVALID_ARGUMENT` that names the field and never echoes its value.
+- **Authorization order.** Role and session presence are checked first, so an unauthorized caller learns nothing about a tool's arguments. Staff sessions get `FORBIDDEN` from every tool, matching the staff-dashboard separation. Patient tools then re-verify the session and account against PostgreSQL (`SESSION_EXPIRED` or `AUTH_REQUIRED`) before running. Public tools need no session.
+- **Pagination.** The runtime fixes the page size at the 20-item limit; the agent supplies only an opaque cursor.
+- **Results.** Search tools return `NO_RESULTS` or `NO_AVAILABILITY` when the first page is empty. `get_my_appointments` returns a successful empty list. `search_clinic_directory` returns `AMBIGUOUS_MATCH` when a clinic name or doctor name matches more than one clinic or doctor and none matches exactly; the error then carries up to five sanitized `choices`. A specialty search with many matches is a normal result. `search_appointment_availability` takes opaque ids only, so it has no ambiguity case.
+- **Idempotency.** Each logical call owns one runtime-generated key and `request_id`. A retry of the same call (after a transient dependency failure or an unknown outcome) reuses them and receives the original result; a call cannot change its tool or arguments on retry (`INVALID_ARGUMENT`, reason `CALL_REUSED`). A new decision by the agent is a new call with a new key. The runtime retries once, after bounded jitter, on `DEPENDENCY_UNAVAILABLE` only.
+- **Tracing.** Each call records the tool name (or `unknown`), request id, duration, outcome, error code, and attempt count. Traces never contain arguments, results, identities, tokens, or messages.
+- **Not implemented.** `RATE_LIMITED` is never produced yet. A local LLM is connected only through the evaluation harness; no application endpoint exposes it.
+
+The error object may carry `fields` (the names of invalid arguments), `validation` (bounded entries containing only `field`, JSON `value_type`, and validation `category`), and `choices` (for `AMBIGUOUS_MATCH`) in addition to `reason`. Validation diagnostics never contain submitted values, Pydantic messages, or validation context that could echo a value.
 
 ### Conflict reasons
 

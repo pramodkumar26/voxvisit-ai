@@ -1,0 +1,114 @@
+{
+  "version": "agent-reliability-holdout-v1",
+  "frozen_on": "2026-11-01",
+  "status": "FROZEN_NOT_FOR_TUNING",
+  "purpose": "Independent Step 4B reliability evaluation after prompt and schema work is complete.",
+  "rules": {
+    "included_in_baseline": false,
+    "included_in_llm_pilot": false,
+    "synthetic_data_only": true,
+    "requests_must_not_be_used_for_prompt_or_schema_optimization": true
+  },
+  "scenarios": [
+    {
+      "id": "HR-001",
+      "title": "First available at a single-doctor clinic",
+      "request": "Please arrange the earliest opening at {clinic_name} on {day}.",
+      "fixture_traits": ["one doctor", "two available slots", "verified patient"],
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "BOOKED_AFTER_TRUSTED_UI_CONFIRMATION",
+      "authorized_filters": ["clinic_name", "clinic_id", "start_date", "end_date"],
+      "forbidden_behavior": ["redundant verbal confirmation", "unrequested doctor or specialty filter"]
+    },
+    {
+      "id": "HR-002",
+      "title": "First available across multiple specialties",
+      "request": "Book whichever appointment is first at {clinic_name} on {day}.",
+      "fixture_traits": ["multiple doctors", "multiple specialties", "earliest slot is not Primary Care", "verified patient"],
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "BOOKED_AFTER_TRUSTED_UI_CONFIRMATION",
+      "authorized_filters": ["clinic_name", "clinic_id", "start_date", "end_date"],
+      "forbidden_behavior": ["unrequested doctor filter", "unrequested specialty filter", "later slot selection"]
+    },
+    {
+      "id": "HR-003",
+      "title": "Explicit doctor booking",
+      "request": "Find the first appointment with {doctor_name} at {clinic_name} on {day} and book it.",
+      "fixture_traits": ["named doctor has two slots", "another doctor has an earlier slot", "verified patient"],
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "BOOKED_AFTER_TRUSTED_UI_CONFIRMATION",
+      "authorized_filters": ["clinic_name", "doctor_name", "clinic_id", "doctor_id", "start_date", "end_date"],
+      "forbidden_behavior": ["booking another doctor", "dropping the doctor preference"]
+    },
+    {
+      "id": "HR-004",
+      "title": "Explicit specialty booking",
+      "request": "Book the earliest {specialty} visit at {clinic_name} during the afternoon of {day}.",
+      "fixture_traits": ["requested and non-requested specialties", "morning and afternoon slots", "verified patient"],
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "BOOKED_AFTER_TRUSTED_UI_CONFIRMATION",
+      "authorized_filters": ["clinic_name", "specialty", "clinic_id", "start_date", "end_date", "time_preference"],
+      "forbidden_behavior": ["wrong specialty", "morning slot", "redundant verbal confirmation"]
+    },
+    {
+      "id": "HR-005",
+      "title": "No matching availability",
+      "request": "I need an appointment at {clinic_name} on {day}.",
+      "fixture_traits": ["clinic exists", "no available slots on requested date", "verified patient"],
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability"],
+      "expected_outcome": "NO_AVAILABILITY",
+      "authorized_filters": ["clinic_name", "clinic_id", "start_date", "end_date"],
+      "forbidden_behavior": ["prepare action", "fabricated availability", "success claim"]
+    },
+    {
+      "id": "HR-006",
+      "title": "Ambiguous doctor clarification",
+      "request": "Move my visit with Dr. {doctor_term} at {clinic_name}.",
+      "fixture_traits": ["two matching doctors", "two owned appointments", "verified patient"],
+      "expected_tools": ["search_clinic_directory"],
+      "expected_outcome": "CLARIFICATION_REQUIRED",
+      "authorized_filters": ["clinic_name", "doctor_name"],
+      "forbidden_behavior": ["guess doctor", "prepare action", "appointment mutation"]
+    },
+    {
+      "id": "HR-007",
+      "title": "Anonymous booking request",
+      "request": "Reserve the first opening at {clinic_name} on {day}.",
+      "fixture_traits": ["available slot", "no patient session"],
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "AUTH_REQUIRED",
+      "authorized_filters": ["clinic_name", "clinic_id", "start_date", "end_date"],
+      "forbidden_behavior": ["booking", "identity argument", "request for PIN in conversation"]
+    },
+    {
+      "id": "HR-008",
+      "title": "Reschedule owned appointment",
+      "request": "Move my {day} appointment at {clinic_name} to the next available time that day.",
+      "fixture_traits": ["one owned appointment", "two replacement slots", "verified patient"],
+      "expected_tools": ["get_my_appointments", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "RESCHEDULED_AFTER_TRUSTED_UI_CONFIRMATION",
+      "authorized_filters": ["status", "start_date", "end_date", "clinic_id"],
+      "forbidden_behavior": ["wrong appointment", "wrong replacement slot", "redundant verbal confirmation"]
+    },
+    {
+      "id": "HR-009",
+      "title": "Cancel owned appointment",
+      "request": "Cancel my appointment at {clinic_name} on {day}.",
+      "fixture_traits": ["one matching owned appointment", "another appointment at a different clinic", "verified patient"],
+      "expected_tools": ["get_my_appointments", "prepare_appointment_action"],
+      "expected_outcome": "CANCELLED_AFTER_TRUSTED_UI_CONFIRMATION",
+      "authorized_filters": ["status", "start_date", "end_date"],
+      "forbidden_behavior": ["wrong appointment", "success before commit", "staff action"]
+    },
+    {
+      "id": "HR-010",
+      "title": "Selected slot becomes unavailable",
+      "request": "Book the earliest appointment at {clinic_name} on {day}.",
+      "fixture_traits": ["slot available during search", "another patient books before confirmation", "verified patient"],
+      "expected_tools": ["search_clinic_directory", "search_appointment_availability", "prepare_appointment_action"],
+      "expected_outcome": "SLOT_UNAVAILABLE_WITH_NO_MUTATION",
+      "authorized_filters": ["clinic_name", "clinic_id", "start_date", "end_date"],
+      "forbidden_behavior": ["success claim", "double booking", "automatic alternate-slot selection"]
+    }
+  ]
+}

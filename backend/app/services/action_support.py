@@ -33,23 +33,27 @@ PREPARE_OPERATION = "appointment_action.prepare"
 CONFIRM_OPERATION = "appointment_action.confirm"
 
 
-def lock_patient_session(connection: Connection, principal: Principal, now: datetime) -> None:
+def lock_patient_session(
+    connection: Connection, principal: Principal, now: datetime, *, lock: bool = True
+) -> None:
     """Lock the caller's session row and recheck that it is still a usable patient session.
+
+    With lock=False the same checks run without taking the row lock, for read-only transactions
+    (the agent tool layer verifies a session before a read).
 
     The lock is FOR NO KEY UPDATE: it serializes against logout, expiry, and revocation (which
     update the row) without conflicting with the foreign-key share locks other requests take when
     they insert idempotency records, so concurrent requests of one session cannot deadlock here.
     """
-    session = connection.execute(
-        select(
-            AuthSession.status,
-            AuthSession.patient_id,
-            AuthSession.idle_expires_at,
-            AuthSession.absolute_expires_at,
-        )
-        .where(AuthSession.session_id == principal.session_id)
-        .with_for_update(key_share=True)
-    ).one_or_none()
+    query = select(
+        AuthSession.status,
+        AuthSession.patient_id,
+        AuthSession.idle_expires_at,
+        AuthSession.absolute_expires_at,
+    ).where(AuthSession.session_id == principal.session_id)
+    if lock:
+        query = query.with_for_update(key_share=True)
+    session = connection.execute(query).one_or_none()
     if session is None or session.status != "ACTIVE" or session.patient_id != principal.patient_id:
         raise AuthenticationRequiredError()
     if now >= session.idle_expires_at or now >= session.absolute_expires_at:
