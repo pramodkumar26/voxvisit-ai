@@ -1,0 +1,117 @@
+name: CI
+
+# Deterministic checks for the backend. Everything runs against a disposable PostgreSQL 17
+# container created for the job and discarded with it. No secrets, API keys, paid services, or
+# persistent databases are used: the database allows only the job's own network and has no
+# password to leak.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint, migrations, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        # The same image as compose.yaml. The official image bundles the contrib extensions,
+        # including btree_gist, which the schema's slot-overlap exclusion constraint needs.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: voxvisit
+          POSTGRES_USER: voxvisit
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U voxvisit -d voxvisit"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # Only reachable from this job's runner. The tests create and drop their own
+      # voxvisit_test_* databases through this role, which owns the disposable server.
+      DATABASE_URL: postgresql+psycopg://voxvisit@127.0.0.1:5432/voxvisit
+      APP_ENV: test
+      UV_PYTHON_DOWNLOADS: never
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Verify uv.lock is up to date
+        run: uv lock --check
+
+      - name: Install locked dependencies
+        run: uv sync --locked --group dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Check the PostgreSQL service
+        run: uv run python .github/scripts/check_postgres.py preflight
+
+      - name: Verify migrations and schema drift
+        run: |
+          set -euo pipefail
+          alembic() { uv run alembic -c backend/alembic.ini "$@"; }
+
+          heads=$(alembic heads | grep -c '(head)' || true)
+          if [ "$heads" != "1" ]; then
+            echo "::error title=Migration heads::Expected exactly one Alembic head, found $heads."
+            alembic heads
+            exit 1
+          fi
+
+          alembic upgrade head
+          alembic current | grep -q '(head)' \
+            || { echo "::error title=Migrations::The database is not at the migration head."; exit 1; }
+          alembic check \
+            || { echo "::error title=Schema drift::The models and the migrated schema differ."; exit 1; }
+
+          # Every migration must also reverse cleanly and re-apply.
+          alembic downgrade base
+          alembic upgrade head
+          alembic check
+
+      - name: Run the complete test suite against PostgreSQL
+        env:
+          RUN_DATABASE_TESTS: "1"
+        run: uv run pytest --strict-markers --junitxml=test-results/junit.xml
+
+      - name: Require that no test was skipped
+        run: uv run python .github/scripts/check_test_report.py test-results/junit.xml
+
+      - name: Confirm the tests removed their disposable databases
+        if: always()
+        run: uv run python .github/scripts/check_postgres.py no-leaked-test-databases

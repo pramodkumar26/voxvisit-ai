@@ -1,0 +1,48 @@
+[project]
+name = "voxvisit-backend"
+version = "0.1.0"
+description = "VoxVisit AI backend foundation"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "alembic>=1.14,<2",
+    "argon2-cffi>=25.1.0",
+    "fastapi>=0.115,<1",
+    "psycopg[binary]>=3.2,<4",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "sqlalchemy>=2.0,<3",
+    "uvicorn[standard]>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest>=8.3,<10",
+    "ruff>=0.9,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+markers = [
+    "integration: requires the local PostgreSQL service",
+]
+pythonpath = ["backend"]
+testpaths = ["backend/tests"]
+
+[tool.ruff]
+extend-exclude = [".uv-cache", ".venv"]
+line-length = 100
+src = ["backend"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["alembic"]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/alembic/versions/*" = ["E501"]

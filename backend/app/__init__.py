@@ -1,0 +1,1 @@
+"""VoxVisit AI backend application."""
