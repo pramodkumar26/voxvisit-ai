@@ -90,6 +90,7 @@ Approved timing rules remain unchanged:
 ## Renewal, Logout, and Revocation
 
 - Valid protected activity may refresh only the inactivity deadline and never extend the absolute lifetime.
+- Session deadlines are evaluated against the application's clock. Recorded activity never moves backwards, so an instance whose clock lags slightly cannot fail a request or shorten a session.
 - Renewal after absolute expiration requires credential reauthentication and creates a new session token.
 - Token rotation occurs on successful reauthentication and security-sensitive renewal.
 - Logout immediately invalidates the current session and its unfinished pending actions.

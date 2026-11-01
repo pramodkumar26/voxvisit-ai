@@ -72,6 +72,10 @@ Errors use the same envelope and never reveal whether another patient's protecte
 
 Responses contain no raw SQL errors, stack traces, internal table names, credentials, tokens, or unrestricted conversation transcripts.
 
+An error may also carry an optional `reason`: a stable, machine-readable refinement of its `code`, for example `CONFIRMATION_EXPIRED` under `CONFLICT`. The reasons in use are listed after the error taxonomy. A reason never reveals protected data.
+
+The FastAPI endpoints behind the tools return plain response models and the shared error body `{"error": {"code", "message", "reason"?}}` with the HTTP status for the code. An empty result is a normal `200` with empty lists. The tool runtime wraps these into the envelope above, generates `request_id` and idempotency keys, and maps empty results to `NO_RESULTS` or `NO_AVAILABILITY` and multiple matches to `AMBIGUOUS_MATCH`. That runtime is not yet implemented.
+
 ## Tool Contracts
 
 ### `search_clinic_directory`
@@ -158,10 +162,10 @@ Illustrative request and response:
   - `RESCHEDULE`: required `appointment_id` and `new_slot_id`.
   - `CANCEL`: required `appointment_id`.
 - Validation: Active patient session; ownership for existing appointments; approved self-service cutoff; current appointment and slot state; non-removed slot; unambiguous identifiers; no unsupported fields.
-- Response: Pending action ID, action type, stored status `ACTIVE`, UI label `AWAITING_UI_CONFIRMATION`, exact display summary, creation time, 10-minute `expires_at`, and `confirmation_required: true`. Internal expected versions remain server-side.
-- Authorization: Patient identity and ownership come only from the session. Public and staff sessions are rejected.
+- Response: Pending action ID, action type, stored status `ACTIVE`, UI label `AWAITING_UI_CONFIRMATION`, exact display summary, creation time, 10-minute `expires_at`, and `confirmation_required: true`. Internal expected versions remain server-side. They record the version of every record the action depends on: the slot to be booked (`BOOK`); the appointment, the slot being released, and the replacement slot (`RESCHEDULE`); the appointment and its slot (`CANCEL`).
+- Authorization: Patient identity and ownership come only from the session. Public and staff sessions are rejected. A pending action is bound to the session that prepared it.
 - Mode and side effects: Creates or returns an idempotent `pending_actions` record only. It does not create, move, cancel, hold, or reserve an appointment or slot.
-- Idempotency: The runtime supplies an idempotency key. Retrying the same preparation with the same normalized arguments returns the original pending action. Reusing the key with different arguments fails.
+- Idempotency: The runtime supplies an idempotency key. Retrying the same preparation with the same normalized arguments returns the original pending action. Reusing the key with different arguments fails with `CONFLICT` (reason `IDEMPOTENCY_KEY_REUSED`). A replay is served only after the session and account are re-verified, and only to the session that owns the pending action: another session or patient receives `RESOURCE_NOT_AVAILABLE` and nothing from the stored result.
 - Errors: `AUTH_REQUIRED`, `SESSION_EXPIRED`, `INVALID_ARGUMENT`, `RESOURCE_NOT_AVAILABLE`, `SLOT_UNAVAILABLE`, `SELF_SERVICE_CUTOFF`, `CONFLICT`, `RATE_LIMITED`, `DEPENDENCY_UNAVAILABLE`.
 - Safe message example: "That appointment change cannot be prepared. Please review the current appointment details."
 
@@ -297,11 +301,20 @@ Illustrative grounded retrieval response:
 2. The UI displays the exact operation and relevant clinic, doctor, date, time, appointment, waitlist, or offer details.
 3. The patient confirms through a dedicated authenticated UI control.
 4. The UI calls a separate FastAPI confirmation endpoint with the pending action ID, CSRF protection, and an idempotency key.
-5. The backend rechecks the session, ownership, pending-action deadline, record versions, current states, and applicable appointment or offer deadline.
+5. The backend rechecks the session and account, ownership, pending-action deadline, record versions, current states, and applicable appointment or offer deadline.
 6. The backend follows the approved database lock order and commits the full transaction or rolls it back.
 7. A trusted backend event delivers the committed result to the UI and conversation runtime. Only that event may support a success statement.
 
 Pending confirmation lasts at most 10 minutes and never reserves a slot. Offer acceptance additionally requires PostgreSQL `clock_timestamp() < expires_at` after database locks are acquired. The default offer duration remains five minutes and is not extended by preparation or confirmation.
+
+### Appointment confirmation operation
+
+- Request: `POST /me/appointment-actions/{pending_action_id}/confirm` with body `{"confirmed": true}` (only the JSON boolean `true` is accepted), the session cookie, the session-bound CSRF token with an allowed `Origin`, and an `Idempotency-Key` header. The patient and the action's parameters come from the session and the stored pending action, never from the request.
+- It is not a tool. It lives on its own router, tagged `ui-confirmation`, and only that route calls the commit service; the preparation service has no path to it. The agent runtime must enforce the same boundary with an explicit tool registry (a Phase 2 requirement tracked in the release controls).
+- Staleness: confirmation compares every version recorded at preparation (see `prepare_appointment_action`) under the locks. A change to any of them makes the action stale (`CONFLICT`, reason `CONFIRMATION_STALE`). A recorded value that is missing or malformed fails closed the same way, including an action prepared before that value was recorded.
+- Expiry: PostgreSQL `clock_timestamp()` sets the creation time and `expires_at` in one statement. After every lock is held, confirmation treats the action as expired when database time reaches the earlier of `expires_at` and the creation time plus 10 minutes. The application and browser clocks play no part.
+- Replays: a repeated confirmation with the same key and the same pending action returns the original result and commits nothing, only after the session and account are re-verified and only to the owning session. A consumed pending action confirmed under a new key fails with reason `CONFIRMATION_CONSUMED`.
+- Clock sources: in the transaction, business time (a slot being in the future, the self-service cutoff, session deadlines) comes from the application's injected clock, the same clock availability search uses. Only the pending-action lifetime and offer deadlines use PostgreSQL time. Whether the cutoff should also use database time is an open decision (see the release controls).
 
 ## Ambiguous Requests
 
@@ -336,10 +349,25 @@ Pending confirmation lasts at most 10 minutes and never reserves a slot. Offer a
 | `DEPENDENCY_UNAVAILABLE` | A required service timed out or failed | Retry according to tool policy |
 | `INTERNAL_ERROR` | Unexpected safe failure | Do not expose internals or claim success |
 
+### Conflict reasons
+
+`CONFLICT` may carry one of these `reason` values:
+
+| Reason | Meaning |
+|---|---|
+| `CONFIRMATION_EXPIRED` | The pending action is older than 10 minutes by database time |
+| `CONFIRMATION_CONSUMED` | The pending action was already used |
+| `CONFIRMATION_INVALIDATED` | The pending action was invalidated, for example by logout or revocation |
+| `CONFIRMATION_STALE` | A record the action depends on changed since preparation, or its recorded versions are missing or malformed |
+| `APPOINTMENT_NOT_ACTIVE` | The appointment is already cancelled or otherwise no longer `CONFIRMED` |
+| `IDEMPOTENCY_KEY_REUSED` | The key was already used for a different request |
+| `REQUEST_IN_PROGRESS` | A request with this key has not finished |
+
 ## Timeout, Retry, and Idempotency Behavior
 
 - Read-only tools use an initial timeout of 8 seconds.
 - Pending-action and handoff tools use an initial timeout of 12 seconds.
+- Both timeouts bound the whole database transaction, including waits for row locks (PostgreSQL 17 `transaction_timeout`, with `statement_timeout` as well), not each statement. A timeout or deadlock victim returns `DEPENDENCY_UNAVAILABLE` after committing nothing, so it is safe to retry with the same idempotency key.
 - The runtime may retry a read-only call once after a transient timeout using bounded jitter.
 - Preparation, handoff, and other state-changing calls may be retried only with the same runtime-generated idempotency key. An unknown outcome is resolved through the idempotency record rather than creating a second action or ticket.
 - Authentication, authorization, validation, conflict, and expiry errors are not automatically retried.
@@ -357,6 +385,8 @@ Pending confirmation lasts at most 10 minutes and never reserves a slot. Offer a
 | Slot changes after booking preparation | Confirmation fails; no appointment is created. |
 | Offer expires while confirmation is open | Reject acceptance using database time; never extend or revive the offer. |
 | Duplicate preparation or handoff call | Return the stored idempotent result without duplicate records. |
+| Idempotent replay from another session or another patient | Return `RESOURCE_NOT_AVAILABLE`; disclose nothing from the stored result. |
+| A record the action depends on changes after preparation | Reject as stale; commit nothing. |
 | Tool times out after a possible write | Resolve using the same idempotency key; do not repeat blindly or claim success. |
 | Clinic or doctor name is ambiguous | Return choices and require clarification. |
 | Approved policy source has no answer | State that no approved policy answer was found. Do not fabricate one. |

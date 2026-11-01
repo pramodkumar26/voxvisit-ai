@@ -94,6 +94,7 @@ This document defines the approved PostgreSQL design for the VoxVisit AI workflo
 - Columns: `leave_id uuid`, `doctor_id uuid`, `clinic_id uuid`, `starts_at timestamptz`, `ends_at timestamptz`, sanitized reason code.
 - Keys and relationships: primary key `leave_id`; doctor and clinic foreign keys reference `doctors` and `clinics`; the pair references `doctor_clinics`.
 - Constraints: end after start; doctor-clinic assignment must exist.
+- Scope: leave applies only to the doctor at the clinic where it is recorded. A doctor on leave at one clinic remains bookable at another. Availability search and the booking transactions share one definition of a bookable slot, so they cannot disagree.
 - Indexes: doctor and time range; clinic and time range.
 
 ### `slots`
@@ -154,6 +155,9 @@ This document defines the approved PostgreSQL design for the VoxVisit AI workflo
 - Columns: `pending_action_id uuid`, `session_id uuid`, `action_type text`, `target_type text`, `target_id uuid`, sanitized `summary jsonb`, `expected_versions jsonb`, `status text`, `expires_at timestamptz`, `request_id uuid`, timestamps.
 - Keys and relationships: primary key `pending_action_id`; `session_id` references `auth_sessions` with deletion cascading only when the expired session row is cleaned up; target references are polymorphic and validated by the backend.
 - Constraints: status is `ACTIVE`, `CONSUMED`, `INVALIDATED`, or `EXPIRED`; active actions expire after 10 minutes; session ownership is mandatory.
+- Expected versions: `expected_versions` holds the ids and versions the action depends on: the slot (`BOOK`); the appointment, the old slot, and the new slot (`RESCHEDULE`); the appointment and its slot (`CANCEL`). Confirmation fails closed as stale if any is changed, missing, or malformed.
+- Time: `created_at` and `expires_at` are both set from `clock_timestamp()` in one statement. Expiry is evaluated against the database clock after the locks are held. A rejected confirmation does not write the status, so a logically expired action may remain `ACTIVE` until reconciliation.
+- Binding: a pending action can be confirmed only through the session that prepared it.
 - Indexes: session and active status; expiration; unique request ID.
 - Security: no credentials, tokens, PINs, or sensitive conversation content.
 
@@ -239,7 +243,7 @@ This document defines the approved PostgreSQL design for the VoxVisit AI workflo
 - Purpose: Return the original outcome for repeated state-changing requests.
 - Columns: `idempotency_id uuid`, `actor_type text`, `actor_id uuid`, optional `session_id uuid`, `operation text`, `idempotency_key varchar`, `request_hash bytea`, `status text`, `response_code`, `result_type`, `result_id`, optional `response_snapshot jsonb`, `created_at timestamptz`, `completed_at timestamptz`.
 - Keys and relationships: primary key `idempotency_id`; optional `session_id` references `auth_sessions` with `ON DELETE SET NULL`; actor reference is polymorphic.
-- Constraints: `actor_type` is `PATIENT`, `STAFF`, or `ANONYMOUS`; `actor_id` is required; unique actor type, actor ID, operation, and key; `response_snapshot` is either SQL `NULL` or a JSON object. The same key with a different request hash is rejected by the service.
+- Constraints: `actor_type` is `PATIENT`, `STAFF`, or `ANONYMOUS`; `actor_id` is required; unique actor type, actor ID, operation, and key; `response_snapshot` is either SQL `NULL` or a JSON object. The same key with a different request hash is rejected by the service. A key is scoped to the patient and the operation. The record is written in the same transaction as the change and completed just before commit, so a failed attempt leaves nothing behind and the key stays usable. A replay is served only after the session and account are re-verified and only to the session that owns the pending action it refers to.
 - Anonymous scope: public handoff requests have no account, so they use `actor_type = ANONYMOUS`. The backend must generate the `actor_id` as a high-entropy random identifier and keep it stable across retries of the same request. It is never accepted from the model or the client as an identity claim, grants no patient or staff permission, and is isolated from every account scope by `actor_type`. How the scope is carried between retries (session or cookie handling) and per-source rate limiting are deferred to the authentication and public API work.
 - Response snapshot: lets the future idempotency service return the original successful response after a retry. It stores minimal approved response fields only, such as identifiers, status, and display values already visible to the caller. It never stores session tokens, PINs, passwords, credential hashes, clinical records, or unrestricted request bodies. The database enforces only that the value is an object. The service must validate the allowed fields before writing, bound the size, and return a snapshot only after confirming the request hash matches.
 - Indexes: unique lookup key; completion time for retention cleanup.
@@ -253,6 +257,7 @@ This document defines the approved PostgreSQL design for the VoxVisit AI workflo
 - Constraints: unique dedupe key; non-negative attempts; status is `PENDING`, `PROCESSING`, or `PROCESSED`.
 - Indexes: status and available time; aggregate; created time; processed time for retention cleanup.
 - Reliability: the originating transaction inserts the event. Workers claim and retry it idempotently after commit.
+- `SLOT_RELEASED`: the dedupe key is `SLOT_RELEASED:{slot_id}:{slot version after the release}`, so each actual release has exactly one event and a retry cannot add a second. The payload holds only the slot, clinic, and doctor identifiers, the slot times, and the reason (`CANCELLED` or `RESCHEDULED`).
 - Retention: successfully processed events are retained for 14 days after processing. `PENDING`, `PROCESSING`, failed, or otherwise retryable work is never removed by retention cleanup.
 
 ### `security_audit_events`
@@ -308,13 +313,13 @@ Conflicting write operations acquire row locks in this order and skip table type
 7. `slots`.
 8. `handoff_tickets`.
 
-Within one table, multiple rows are locked by primary key in ascending order. Idempotency and claimed outbox work are resolved before the ranked business-row locks. New history, audit, idempotency-result, notification, and outbox rows are inserted after validation and do not introduce a reverse lock dependency.
+Within one table, multiple rows are locked by primary key in ascending order. The session row is locked `FOR NO KEY UPDATE`, which serializes against logout, expiry, and revocation without conflicting with the key-share locks that idempotency inserts take on it. Idempotency and claimed outbox work are resolved before the ranked business-row locks. New history, audit, idempotency-result, notification, and outbox rows are inserted after validation and do not introduce a reverse lock dependency.
 
 If a workflow must discover identifiers in a different order, it performs an unlocked lookup first, acquires the required locks in canonical order, and then rechecks every relevant state and relationship. No transaction may acquire an earlier-ranked lock after holding a later-ranked lock.
 
 ## Transaction Boundaries
 
-All state-changing transactions first resolve idempotency and recheck the active session, authorization, ownership, pending confirmation, and current database state.
+All state-changing transactions first resolve idempotency and recheck the active session, authorization, ownership, pending confirmation, and current database state. A transaction that finds a stored idempotent result still rechecks the session and account and the pending action's owner before returning it. Write transactions run at `READ COMMITTED` with a 12-second limit on the whole transaction (PostgreSQL 17 `transaction_timeout`) and read transactions with an 8-second limit; a timeout rolls everything back.
 
 ### Direct appointment booking
 
@@ -322,11 +327,11 @@ Following the canonical order, lock the session, pending action, and slot. Reche
 
 ### Appointment rescheduling
 
-Following the canonical order, lock the session, pending action, appointment, and old and new slots. Lock both slots by ascending `slot_id`. Recheck ownership, clinic-local cutoff, confirmation, and that the new slot is `AVAILABLE` and not removed. Update the existing appointment, set old slot `AVAILABLE`, set new slot `BOOKED`, append `RESCHEDULED` history, insert `SLOT_RELEASED` outbox work, consume confirmation, and store the result. Any failure preserves the original appointment.
+Following the canonical order, lock the session, pending action, appointment, and old and new slots. Lock both slots by ascending `slot_id`. Recheck ownership, clinic-local cutoff, confirmation, the recorded versions of the appointment and both slots, and that the new slot is `AVAILABLE` and not removed. Update the existing appointment, set old slot `AVAILABLE`, set new slot `BOOKED`, append `RESCHEDULED` history, insert `SLOT_RELEASED` outbox work, consume confirmation, and store the result. Any failure preserves the original appointment.
 
 ### Appointment cancellation
 
-Following the canonical order, lock the session, pending action, appointment, and slot. Recheck ownership, cutoff, and confirmation. Set appointment `CANCELLED`, set slot `AVAILABLE`, append `CANCELLED` history, insert `SLOT_RELEASED`, consume confirmation, and store the result atomically.
+Following the canonical order, lock the session, pending action, appointment, and slot. Recheck ownership, cutoff, confirmation, and the recorded versions of the appointment and slot. Set appointment `CANCELLED`, set slot `AVAILABLE`, append `CANCELLED` history, insert `SLOT_RELEASED`, consume confirmation, and store the result atomically.
 
 ### Waitlist offer creation
 

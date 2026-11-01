@@ -60,6 +60,7 @@ Each transition succeeds only after its database transaction commits. A duplicat
 - The related appointment or offer record and the slot transition are written in the same transaction.
 - A transaction rechecks current database state after acquiring the lock. Earlier search results are not trusted.
 - Concurrent operations must have one winner. Later operations observe the committed state and fail safely.
+- Every slot state change increments the slot's `version`. Pending actions record it, so a change to a slot makes the pending actions that depend on it stale.
 - Booking, holding, accepting, releasing, cancelling, and rescheduling use idempotency keys for safe retries.
 - Rescheduling locks both affected slots in a consistent order to reduce deadlock risk.
 - Any validation or database failure rolls back the entire transaction.
@@ -102,6 +103,7 @@ Selecting a new slot or displaying a pending reschedule does not reserve the new
 ## Doctor Availability
 
 - Doctor working hours, holidays, and leave are managed separately from slot status.
+- Leave applies only to the doctor at the clinic where it is recorded.
 - Slots are generated only within periods when the doctor is available.
 - A later schedule, holiday, or leave change never automatically deletes a confirmed appointment.
 - A confirmed appointment remains `BOOKED` until an explicit approved workflow changes it.

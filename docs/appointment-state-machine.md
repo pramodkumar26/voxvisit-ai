@@ -23,6 +23,7 @@ V1 uses only `CONFIRMED` and `CANCELLED`. `COMPLETED` and `NO_SHOW` are excluded
 - A selected slot remains `AVAILABLE` until a booking transaction commits.
 - `PENDING` is represented by the pending action shown to the patient, not by an appointment status.
 - After confirmation expires, the patient must review the current details and confirm a new pending action.
+- A pending action records the versions of the appointment and every slot it depends on, including the slot a reschedule or cancellation would release. If any of them changed since preparation, confirmation fails as stale and the patient must review the current details again.
 - The backend always rechecks authorization and availability before commit.
 - V1 requires confirmation through the explicit UI control. Voice may prepare an action but cannot authorize execution.
 - `RESCHEDULED` is an action and immutable historical event, not an appointment status.
@@ -101,7 +102,8 @@ Invalid examples:
 - Patients may cancel or reschedule only before the scheduled appointment start time.
 - At or after the start time, the backend rejects patient self-service changes and commits no appointment or slot changes.
 - The appointment start time is interpreted using the clinic's configured timezone.
-- The cutoff is rechecked before commit.
+- The cutoff is rechecked before commit. It compares two absolute instants, the slot's start and the current time, so timezone and daylight saving affect only display.
+- In v1 the current time comes from the application's clock, the same clock availability search uses. Whether the cutoff should use PostgreSQL time instead is an open decision recorded in the release controls.
 - After rejection, the assistant offers simulated staff assistance without claiming that the appointment was changed.
 
 ## Cancelled Appointment Restoration
@@ -130,6 +132,7 @@ History is append-only and is written in the same transaction as the appointment
 - Every protected action checks appointment ownership.
 - Every write requires the approved confirmation boundary.
 - Every mutation uses an idempotency key. A duplicate retry returns the original result without creating another appointment or event.
+- A key is scoped to the patient and the operation. A replay is served only after the session and account are re-verified, and only to the session that owns the pending action; another session or patient is treated as asking for a missing pending action. A key reused with different parameters is rejected.
 - Database uniqueness enforcement allows at most one active booking per slot while retaining cancelled appointment history.
 - Every mutation appends the approved immutable, sanitized history record.
 - Authenticated demo staff may view clinic schedules and limited fictional patient information but may not book, reschedule, or cancel patient appointments in v1.
@@ -171,3 +174,6 @@ History is append-only and is written in the same transaction as the appointment
 | Wrong patient attempts a mutation | Reject the request. No protected data or state changes are committed. |
 | Database failure occurs during a mutation | Roll back appointment, slot, history, event, and idempotency changes. |
 | `SLOT_RELEASED` processing is delayed | Keep the committed event available for idempotent retry. The appointment transaction remains committed. |
+| Appointment or slot changes after preparation (including the slot a reschedule or cancellation would release) | Reject the confirmation as stale. No changes commit. |
+| Idempotent retry arrives from another session or patient | Treat it as a missing pending action. Disclose nothing from the stored result. |
+| A mutation exceeds the 12-second transaction limit | Roll back everything and return a retryable dependency failure. |

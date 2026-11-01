@@ -34,6 +34,7 @@ This list records work that is intentionally not built yet so it cannot be forgo
 
 ### Retention and cleanup jobs
 
+- Status: deferred to pre-release hardening (roadmap Phase 7), not cancelled. The jobs and their tests must exist and pass before any public or shared deployment.
 - Approved retention is not enforced yet: sessions (7 days after expiry), audit events (30 days), completed idempotency records (30 days after completion), processed outbox events (14 days), notifications (30 days).
 - Pending actions have no cleanup. Consumed, invalidated, and logically expired rows should be reconciled to `EXPIRED` and removed after a retention period that still needs to be chosen.
 - Cleanup must never delete unprocessed outbox work, and needs tests for foreign-key behavior and surviving history.
@@ -52,5 +53,20 @@ This list records work that is intentionally not built yet so it cannot be forgo
 ### Other release prerequisites
 
 - PostgreSQL 17 or newer is required: write and read transactions use `transaction_timeout`. Confirm the hosted provider's version before deployment.
-- The CI workflow has been exercised locally but not yet on GitHub. Review the first real Actions run, and refresh the pinned action versions periodically.
-- Argon2id cost benchmarking, the approved common-password list, and administrative logout-all and credential-reset tooling (see the backend README).
+- The CI workflow passed its first real GitHub Actions run (run 41270577286, commit `653db6b`). Refresh the pinned action versions periodically.
+- Argon2id cost benchmarking, the approved common-password list, and administrative logout-all and credential-reset tooling.
+- Neon compatibility for the PostgreSQL 17 features used (`transaction_timeout`, `btree_gist`, row-lock behavior) is unverified, as is behavior under load and in deployed browsers.
+
+## Open Decisions
+
+Behavior the implementation has settled for v1 but that the approved documents did not decide. Each is working as described; none changes the approved architecture. They need an explicit decision before the related feature ships.
+
+1. **Clock for the self-service cutoff and "bookable in the future".** v1 uses the application's injected clock, the same clock availability search uses, while pending-action and offer deadlines use PostgreSQL time. The alternative is PostgreSQL time for the cutoff too, which removes application-clock skew from the decision at the cost of harder test control.
+2. **Replay across sessions.** A replay is served only to the session that owns the pending action, because pending actions are session-bound. A patient who logs in again and retries an old key receives a not-found response, not the original result; their appointment is visible in their appointment list. The alternative is allowing the same patient to replay across sessions.
+3. **Strictness of staleness.** Any version change to the appointment or a slot it depends on, even one that does not alter what the patient was shown, makes a pending action stale. This is the safest reading of "a relevant record-version change invalidates the pending action" but may cause avoidable re-confirmations once staff can edit slots.
+4. **Reschedule scope.** A reschedule may move to any bookable slot at any clinic or with any doctor. The documents do not restrict it to the same doctor or clinic.
+5. **Overlapping appointments.** Nothing prevents one patient from holding overlapping confirmed appointments with different doctors, and a patient may hold several active pending actions for the same target. Whether either should be restricted is undecided.
+6. **Pending-action status.** A rejected confirmation does not write the status, so an expired action stays `ACTIVE` until a reconciliation job exists. The retention period for consumed, invalidated, and expired actions is not chosen.
+7. **Retention tests in Phase 1.** The original Phase 1 sequence listed retention tests. They are deferred, not cancelled, to pre-release hardening together with the cleanup jobs, which do not exist yet, and they gate any public or shared deployment.
+8. **Idempotency conflict before session recheck.** A key reused with different parameters is reported before the session is rechecked. It is reachable only with the same patient's own key and discloses nothing beyond that the key was used.
+9. **Error body versus tool envelope.** The REST endpoints return plain models and `{"error": {...}}`; the tool contract's `ok/request_id/data/error` envelope, `retryable`, `NO_RESULTS`, `NO_AVAILABILITY`, and `AMBIGUOUS_MATCH` are for the tool runtime to provide in Phase 2.

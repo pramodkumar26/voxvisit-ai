@@ -2,7 +2,7 @@
 
 **Status:** Approved  
 **Role:** Current master blueprint  
-**Historical foundation:** [VoxVisit AI Project Blueprint V3](./VoxVisit_AI_Project_Blueprint_v3.md)
+**Detailed designs:** the approved technical documents listed under [Documentation Authority](#documentation-authority), with progress tracked in the [development roadmap](./roadmap.md)
 
 ## Purpose and Demonstration Objective
 
@@ -19,7 +19,7 @@ Documentation precedence is:
 1. Approved technical design documents are authoritative for detailed implementation and safety rules.
 2. This master blueprint defines current project scope, goals, and system architecture.
 3. The [development roadmap](./roadmap.md) defines implementation order, estimates, and progress.
-4. The original [V3 blueprint](./VoxVisit_AI_Project_Blueprint_v3.md) is historical reference material.
+4. The [evaluation strategy](./evaluation-strategy.md) defines how the specified behavior is verified.
 
 An approved technical design is never silently replaced by a summary in this blueprint. When documents appear inconsistent, implementation follows the highest applicable authority and the discrepancy must be reviewed explicitly.
 
@@ -32,6 +32,8 @@ Authoritative technical designs:
 - [Authentication and Session Management](./authentication-and-sessions.md)
 - [PostgreSQL Database Design](./database-design.md)
 - [Agent Tool Contracts](./agent-tool-contracts.md)
+
+The [release controls](./release-controls.md) track outstanding deployment requirements and open decisions. They are a tracking list, not a design authority.
 
 ## Target Users
 
@@ -226,6 +228,14 @@ V1 includes a small synthetic FHIR-like adapter to demonstrate a structured heal
 - Approved scheduling commands and committed results translate through an internal adapter interface.
 - Deterministic fixtures support mapping, authorization-boundary, and consistency tests without a live external service.
 
+The implemented adapter is deliberately a simplification, not an HL7 FHIR implementation:
+
+- It serves five read-only resource types (Patient, Practitioner, Schedule, Slot, Appointment) as `GET` endpoints under `/integration/fhir-like`, built per request from PostgreSQL inside read-only transactions, reusing the availability and own-appointment services. Nothing is stored or cached, and no write, booking, or confirmation operation exists in it.
+- Resource ids are the existing UUIDs. A Schedule is a doctor at one clinic and has no row of its own, so its id is the doctor UUID and the clinic UUID in hex, concatenated: 64 characters, stable, and reversible. The clinic is a logical reference (identifier and display name), not a served Location resource.
+- Slot `AVAILABLE` maps to `free` only when the slot is genuinely bookable at the time of the read, otherwise to `busy-unavailable`; `BOOKED` maps to `busy` and `HELD` to `busy-tentative`. Appointment `CONFIRMED` maps to `booked` and `CANCELLED` to `cancelled`. An unknown stored status is refused.
+- Access follows the permission matrix: the public sees listed doctors, active schedules, and bookable slots; a patient also sees their own record, appointments, and the slots of those appointments; staff see the schedule view and only the patient id, code, and display name. A record the caller may not see looks like a missing one.
+- Every resource carries a `synthetic-fhir-like` tag, and responses use plain `application/json`. The adapter has no CapabilityStatement or OperationOutcome and uses this project's own search parameters and error body.
+
 The adapter is not a second scheduling system. FastAPI remains responsible for authentication, ownership, confirmation, validation, and transaction orchestration. PostgreSQL remains authoritative. The adapter cannot write around the service layer or bypass approved appointment, slot, waitlist, audit, or idempotency rules.
 
 The internal adapter interface marks the future boundary where an authorized EHR integration could be introduced. Such an integration would require separate credentials, security review, mapping validation, conformance testing, and approval. V1 uses no Epic credentials, production FHIR server, real patient data, or live hospital connection and makes no FHIR conformance, certification, endorsement, or production-interoperability claim.
@@ -354,4 +364,4 @@ The following later decisions supersede open or less-specific statements in V3:
 
 No unresolved Phase 0 architecture decision remains. Implementation must still verify Neon PostgreSQL and extension compatibility, hosted inference, browser speech, Vercel-to-Cloud Run cookie behavior, Argon2id cost parameters, hosted RAG storage and embeddings, connection behavior, cloud quotas, costs, and deployment configuration.
 
-The synthetic FHIR-like adapter is implemented toward the end of Phase 1. EV-020 does not block the Phase 1 scheduling exit criterion, but it must pass before the final public release.
+The synthetic FHIR-like adapter has been implemented and verified locally and in CI as part of Phase 1. Its deterministic mapping and authorization checks exist now. EV-020 did not block the Phase 1 scheduling exit criterion, but it must still pass in full, including its agent-facing parts, before the final public release.
