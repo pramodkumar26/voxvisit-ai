@@ -41,6 +41,7 @@ class Awaiting(StrEnum):
     CLINIC = "CLINIC"
     CLINIC_CHOICE = "CLINIC_CHOICE"
     DOCTOR = "DOCTOR"
+    SPECIALTY = "SPECIALTY"
     DATE = "DATE"
     TIME = "TIME"
     APPOINTMENT = "APPOINTMENT"
@@ -73,6 +74,7 @@ class ConversationState:
     # search still returns it; otherwise it is dropped and the patient is asked again.
     pin_appointment: str | None = None
     pin_slot: str | None = None
+    offer_offset: int = 0
     turns: int = 0
 
     def reset(self) -> None:
@@ -82,6 +84,7 @@ class ConversationState:
         self.offered = []
         self.prepared = None
         self.pin_appointment = self.pin_slot = None
+        self.offer_offset = 0
 
 
 @dataclass(frozen=True)
@@ -101,22 +104,53 @@ class TextSession:
         self.patient_id = principal.patient_id if principal else None
         self.transcript: list[Message] = []
         self.prepared_action_id: str | None = None
+        self.turn_calls: list[tuple[str, dict[str, Any]]] = []  # The tools called this turn.
 
     def respond(self, utterance: str) -> AgentReply:
         """Handle one patient message. Always returns text, even after a model or tool fault."""
-        self.transcript.append(Message("user", {"request": utterance[:MAX_UTTERANCE_CHARS]}))
+        self.add_utterance(utterance)
         return self._run()
 
     def confirmation_event(self, payload: Mapping[str, Any]) -> AgentReply:
         """The trusted UI reports what happened when the patient pressed Confirm (or could not)."""
-        self.transcript.append(Message("trusted_event", dict(payload)))
-        self.prepared_action_id = None  # The review it was about is finished, committed or not.
+        self.add_event(payload)
         return self._run()
 
-    def _run(self) -> AgentReply:
-        reply = self._turn()
-        # On every way a turn can end, including a fault: a review the conversation no longer has
-        # must not stay open on a screen.
+    # The steps of a turn, separate so another driver (the LangGraph path) runs the very same ones.
+
+    def add_utterance(self, utterance: str) -> None:
+        self.turn_calls = []
+        self.transcript.append(Message("user", {"request": utterance[:MAX_UTTERANCE_CHARS]}))
+
+    def add_event(self, payload: Mapping[str, Any]) -> None:
+        self.turn_calls = []
+        self.transcript.append(Message("trusted_event", dict(payload)))
+        self.prepared_action_id = None  # The review it was about is finished, committed or not.
+
+    def decide(self) -> AgentReply | ToolAction:
+        """One decision of the model: the reply that ends the turn, or a tool to run."""
+        try:
+            action = self.model.decide(self.transcript)
+        except Exception:  # A provider or adapter fault must still leave the patient a reply.
+            return AgentReply(FALLBACK_REPLY, False)
+        if isinstance(action, Say):
+            return AgentReply(action.text or FALLBACK_REPLY, self._review_pending())
+        if isinstance(action, ToolAction):
+            return action
+        return AgentReply(FALLBACK_REPLY, False)
+
+    def run_tool(self, action: ToolAction) -> None:
+        response = self.runtime.invoke(
+            action.tool, dict(action.arguments), principal=self.principal
+        ).to_dict()
+        self.turn_calls.append((action.tool, dict(action.arguments)))
+        self.transcript.append(Message("tool", response))
+        if action.tool == "prepare_appointment_action" and response.get("ok"):
+            self.prepared_action_id = str((response.get("data") or {}).get("pending_action_id"))
+
+    def conclude(self, reply: AgentReply) -> AgentReply:
+        """On every way a turn can end, including a fault: a review the conversation no longer has
+        must not stay open on a screen."""
         self.prepared_action_id, failed = retire_dropped_review(
             self.model, self.runtime, self.principal, self.prepared_action_id
         )
@@ -126,26 +160,19 @@ class TextSession:
             )
         return reply
 
+    def _run(self) -> AgentReply:
+        return self.conclude(self._turn())
+
     def _turn(self) -> AgentReply:
         for _ in range(MAX_ACTIONS_PER_TURN):
-            try:
-                action = self.model.decide(self.transcript)
-            except Exception:  # A provider or adapter fault must still leave the patient a reply.
-                return AgentReply(FALLBACK_REPLY, False)
-            if isinstance(action, Say):
-                return AgentReply(action.text or FALLBACK_REPLY, self._review_pending())
-            if isinstance(action, ToolAction):
-                response = self.runtime.invoke(
-                    action.tool, dict(action.arguments), principal=self.principal
-                ).to_dict()
-                self.transcript.append(Message("tool", response))
-                if action.tool == "prepare_appointment_action" and response.get("ok"):
-                    self.prepared_action_id = str(
-                        (response.get("data") or {}).get("pending_action_id")
-                    )
-                continue
-            break
+            step = self.decide()
+            if isinstance(step, AgentReply):
+                return step
+            self.run_tool(step)
         return AgentReply(FALLBACK_REPLY, False)
+
+    def close(self) -> None:
+        """Nothing is held outside the session object itself."""
 
     def _review_pending(self) -> bool:
         state = getattr(self.model, "state", None)
@@ -211,8 +238,10 @@ class ConversationRegistry:
         max_sessions: int = MAX_SESSIONS,
         idle_seconds: float = IDLE_SECONDS,
         timer: Callable[[], float] = time.monotonic,
+        session_factory: Callable[[Model, Any, Principal | None], TextSession] = TextSession,
     ) -> None:
         self._make_model = make_model
+        self._factory = session_factory
         self._max = max_sessions
         self._idle = idle_seconds
         self._timer = timer
@@ -236,21 +265,25 @@ class ConversationRegistry:
             session.runtime = runtime
             session.principal = principal
         else:
-            session = TextSession(self._make_model(), runtime, principal)
+            if held is not None:
+                held[0].close()  # It belonged to someone else: nothing of it is reused.
+            session = self._factory(self._make_model(), runtime, principal)
         self._sessions[key] = (session, now)
         self._sessions.move_to_end(key)
         while len(self._sessions) > self._max:
-            self._sessions.popitem(last=False)
+            self._sessions.popitem(last=False)[1][0].close()
         return session
 
     def end(self, principal: Principal | None, *, anonymous_id: str | None = None) -> None:
         """Forget a conversation, for example at sign-out."""
         key = ("session", principal.session_id) if principal else ("anonymous", anonymous_id)
-        self._sessions.pop(key, None)
+        held = self._sessions.pop(key, None)
+        if held is not None:
+            held[0].close()
 
     def _expire(self, now: float) -> None:
         for key in [k for k, (_, seen) in self._sessions.items() if now - seen > self._idle]:
-            del self._sessions[key]
+            self._sessions.pop(key)[0].close()
 
 
 def new_anonymous_id() -> str:

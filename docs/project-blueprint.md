@@ -280,6 +280,10 @@ Evaluation begins before model and voice integration.
 - RAG tests measure source support, correct abstention, citation behavior, and prompt-injection resistance.
 - Voice tests include ambiguous names and dates, transcription errors, retries, confirmation display, and typed fallback.
 - Report p50 and p95 transcription, model, tool, speech, and full-turn latency from measured runs.
+- The local Phase 3 pilot recorded 14 supervised microphone turns and one browser-confirmed synthetic
+  booking. Its small-sample latency baseline and observed usability limitations are recorded in
+  [Phase 3 Browser Confirmation](./phase3-browser-confirmation.md); they do not establish production
+  performance or reliability targets.
 
 ### Release evidence
 
@@ -326,7 +330,7 @@ Provider compatibility, inference, speech, final cookie behavior, quotas, and co
 
 ## Development Plan
 
-The [Development Roadmap](./roadmap.md) is authoritative for phase order, progress, and estimates. The approved plan remains eight phases and 35 to 49 working days. Phase 0 design and decisions are complete. Phase 1 backend foundation is in progress.
+The [Development Roadmap](./roadmap.md) is authoritative for phase order, progress, and estimates. The approved plan remains eight phases and 35 to 49 working days. Phases 0 through 3 are complete for the local prototype. Later phases, deployment verification, and production hardening remain.
 
 ## Final Deliverables
 

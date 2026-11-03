@@ -24,6 +24,7 @@ EXPECTED_TABLES = {
     "patient_credentials",
     "patients",
     "pending_actions",
+    "review_handoffs",
     "security_audit_events",
     "slot_offers",
     "slots",
@@ -85,7 +86,7 @@ def test_database_is_at_the_single_migration_head(migrated_engine: Engine) -> No
         versions = (
             connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
         )
-    assert versions == ["0003"]
+    assert versions == ["0004"]
 
 
 def test_required_indexes_exist(migrated_engine: Engine) -> None:

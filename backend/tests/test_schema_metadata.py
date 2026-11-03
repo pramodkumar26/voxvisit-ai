@@ -6,7 +6,8 @@ POSTGRESQL_IDENTIFIER_LIMIT = 63
 def test_model_metadata_defines_the_approved_tables() -> None:
     import app.db.models  # noqa: F401
 
-    assert len(Base.metadata.tables) == 24
+    # The 24 approved tables, plus review_handoffs (migration 0004, Phase 3.3).
+    assert len(Base.metadata.tables) == 25
 
 
 def test_constraint_and_index_names_fit_postgresql_identifier_limit() -> None:

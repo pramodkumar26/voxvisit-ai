@@ -416,8 +416,30 @@ def test_only_the_ui_driver_and_runner_know_about_the_trusted_ui() -> None:
         if "app.evaluation.ui_driver" in _imports(path)
     )
 
-    # The model, the scenarios, and their data never touch the UI driver.
-    assert importers == ["runner.py"]
+    # The model, the scenarios, and their data never touch the UI driver. Only the two harnesses
+    # that play the patient's browser (the Phase 2 runner and the LG-4 runner) may.
+    assert importers == ["lg4_eval.py", "runner.py"]
+    agent_side = {
+        "hybrid",
+        "conversation",
+        "orchestrator",
+        "planner",
+        "turn_reader",
+        "model",
+        "offers",
+        "graph_store",
+        "graph_service",
+    }
+    assert not agent_side & {name.removesuffix(".py") for name in importers}
+
+
+def test_the_checkpoint_store_and_service_never_touch_credentials_or_the_commit_path() -> None:
+    for name in ("graph_store.py", "graph_service.py", "orchestrator.py", "offers.py"):
+        source = (APP / "evaluation" / name).read_text()
+        imports = _imports(APP / "evaluation" / name)
+        assert not any(i.startswith("app.api") for i in imports), name
+        assert "hash_token" not in source and "csrf" not in source.lower(), name
+        assert "password" not in source.lower().replace("hide_password", ""), name
 
 
 def test_the_ui_driver_does_not_use_the_agent_tool_layer() -> None:

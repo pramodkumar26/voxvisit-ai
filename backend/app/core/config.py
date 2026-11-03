@@ -1,5 +1,6 @@
 import re
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -9,12 +10,15 @@ DEVELOPMENT_ORIGINS = (
     "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
 )
 MIN_AUTH_SECRET_LENGTH = 32
+# The repository's .env wherever a command is run from (backend/ or the repository root). A .env in
+# the current folder is read after it and wins, so a local override still works.
+REPOSITORY_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 ORIGIN_PATTERN = re.compile(r"https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(REPOSITORY_ENV_FILE, ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
         populate_by_name=True,

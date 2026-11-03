@@ -6,6 +6,7 @@ from app.db.models.identity import (
     Patient,
     PatientCredential,
     PendingAction,
+    ReviewHandoff,
     StaffCredential,
     StaffUser,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "Patient",
     "PatientCredential",
     "PendingAction",
+    "ReviewHandoff",
     "SecurityAuditEvent",
     "Slot",
     "SlotOffer",

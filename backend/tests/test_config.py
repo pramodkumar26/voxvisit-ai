@@ -25,3 +25,12 @@ def test_database_url_is_masked_in_settings() -> None:
 
     assert password not in repr(settings)
     assert str(settings.database_url) == "**********"
+
+
+def test_the_repository_env_file_is_found_from_any_folder() -> None:
+    from app.core.config import REPOSITORY_ENV_FILE
+
+    # It points at the repository root (the folder holding backend/), not at the current folder.
+    assert (REPOSITORY_ENV_FILE.parent / "backend" / "app" / "core" / "config.py").is_file()
+    assert REPOSITORY_ENV_FILE.name == ".env"
+    assert Settings.model_config["env_file"][0] == REPOSITORY_ENV_FILE

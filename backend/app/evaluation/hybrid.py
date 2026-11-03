@@ -17,12 +17,25 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
+from app.evaluation.availability_notes import (
+    FILTER_ARGUMENTS,
+    LOOK_AHEAD_DAYS,
+    filtered_out,
+    later_days,
+    next_days,
+    no_such_specialty,
+    nothing_ahead,
+    same_specialty,
+    specialties_listed,
+    specialties_open,
+)
 from app.evaluation.conversation import (
     MAX_TURNS_PER_SESSION,
     Awaiting,
@@ -30,10 +43,11 @@ from app.evaluation.conversation import (
     Offer,
     Prepared,
 )
-from app.evaluation.llm import CallRecord, LlmConfig, LlmUsage, Transport, http_transport
+from app.evaluation.llm import LlmConfig, LlmUsage, Transport, http_transport, record_of
 from app.evaluation.model import MalformedModelResponse, Message, Say, ToolAction
 from app.evaluation.spoken import (
     MONTHS,
+    WEEKDAYS,
     ClockMention,
     DateMention,
     clock_mentions,
@@ -49,6 +63,7 @@ from app.evaluation.spoken import (
 )
 
 MAX_SEARCH_DAYS = 31  # The backend refuses a longer availability window.
+SPOKEN_OPTION_LIMIT = 3
 HYBRID_PROMPT_VERSION = "ab-b6"
 _INTENT_INSTRUCTIONS = """\
 Read the patient's LATEST message about a scheduling request and return its intent as JSON
@@ -176,8 +191,21 @@ REPAIR_NOTE = (
 )
 
 
+_POSSESSIVE = re.compile(r"['\u2019]s$", re.IGNORECASE)
+
+
+def without_possessive(name: str | None) -> str | None:
+    """ "Dr. Kim's" (said of Dr. Kim's Monday) is Dr. Kim."""
+    return _POSSESSIVE.sub("", name.strip()) if name else name
+
+
 class PatientIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("clinic_name", "doctor_name", mode="after")
+    @classmethod
+    def _name_without_possessive(cls, value: str | None) -> str | None:
+        return without_possessive(value)
 
     operation: Literal["BOOK", "RESCHEDULE", "CANCEL", "UNKNOWN"]
     clinic_name: str | None = None
@@ -196,6 +224,21 @@ class PatientIntent(BaseModel):
     message_type: Literal["REQUEST", "ABANDON", "AGREEMENT", "OFF_TOPIC"] = "REQUEST"
 
 
+@dataclass
+class PlannerHints:
+    """What the graph planner has understood about this one message, passed to the controller
+    and used for that message only. A hint can keep the request in progress from being replaced,
+    or carry what a lookup just showed; it never supplies a time, a doctor, or a decision."""
+
+    same_request: bool = False  # The message answers or corrects the request in progress.
+    keep_goal: bool = False  # An off-topic reading must not end the request.
+    carry_clinic: str | None = None  # A clinic the patient was just shown openings for.
+    carry_date: date | None = None  # The one day they were shown.
+    carry_window: tuple[date, date] | None = None  # Or the days: "Thursday" is one of these.
+    carry_doctor: str | None = None  # The one doctor they were just told about.
+    start_booking: bool = False  # The message asks for an appointment without a booking word.
+
+
 class Draft(PatientIntent):
     """The request so far, merged across messages. Only the model-facing fields above are read
     from the model; the rest is kept by the controller from the words of the messages."""
@@ -207,6 +250,10 @@ class Draft(PatientIntent):
         ""  # How start_date was said ("rel:tomorrow"), to read it on the clinic's day.
     )
     new_spec: str = ""
+    # Whether the patient clearly asked for this operation (by an act of booking, by agreeing to
+    # a listed opening, or by a reading an independent second reading confirmed). A request that
+    # only asked what exists is never turned into a review: see `_continue`.
+    vouched: bool = False
 
 
 # --- reading dates and times: see app/evaluation/spoken.py ---------------------------------------
@@ -228,7 +275,7 @@ _ORDINAL_VALUE = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
 
 
 def _name_tokens(value: str) -> list[str]:
-    cleaned = re.sub(r"[^\w\s']", " ", value.casefold())
+    cleaned = re.sub(r"[^\w\s']", " ", re.sub(r"['\u2019]s\b", "", value.casefold()))
     return [token for token in cleaned.split() if token not in {"dr", "doctor"}]
 
 
@@ -238,6 +285,60 @@ def _name_supported(value: str, request: str) -> bool:
         return True
     wanted, stated = _name_tokens(value), set(_name_tokens(request))
     return bool(wanted) and all(token in stated for token in wanted)
+
+
+_GENERIC_WORDS = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "at",
+        "care",
+        "center",
+        "centre",
+        "clinic",
+        "clinics",
+        "dr",
+        "doctor",
+        "group",
+        "health",
+        "hospital",
+        "in",
+        "medical",
+        "of",
+        "office",
+        "practice",
+        "the",
+    ]
+)
+
+
+def _stated_part(value: str, request: str) -> str | None:
+    """The longest run of words of a name that the message really contains, as written there, if
+    it holds a word that tells places apart. "Two Rivers Clinic" for a patient who said "Two
+    Rivers" is "Two Rivers"; a lone "Clinic" is nothing."""
+    words = value.split()
+    lowered = request.casefold()
+    for size in range(len(words) - 1, 0, -1):
+        for start in range(len(words) - size + 1):
+            part = " ".join(words[start : start + size])
+            at = lowered.find(part.casefold())
+            if at >= 0 and any(
+                w.casefold().strip(".,") not in _GENERIC_WORDS for w in part.split()
+            ):
+                return request[at : at + len(part)]
+    return None
+
+
+def _specialty_stated(specialty: str, request: str) -> bool:
+    """Whether the message names this specialty: "cardiologist" names Cardiology. Compared by
+    stem, so any specialty and any form of its name works, with no list of them."""
+    if _name_supported(specialty, request):
+        return True
+    stem = specialty.casefold().strip()[:5]
+    return len(stem) == 5 and any(
+        word[:5] == stem for word in re.findall(r"[a-z]{5,}", request.casefold())
+    )
 
 
 class StructuredIntentExtractor:
@@ -282,6 +383,7 @@ class StructuredIntentExtractor:
             ],
             "format": PatientIntent.model_json_schema(),
             "stream": False,
+            **({"think": self.config.think} if self.config.think is not None else {}),
             "options": {
                 "temperature": self.config.temperature,
                 "num_predict": self.config.max_output_tokens,
@@ -327,10 +429,12 @@ class StructuredIntentExtractor:
         dates = stated_dates(request, today or datetime.now(UTC).date(), anchor)
         clocks = stated_clocks(request)
         replaced: dict[str, Any] = {}
-        for field in ("clinic_name", "doctor_name", "specialty"):
+        for field in ("clinic_name", "doctor_name"):
             value = getattr(intent, field)
             if value and not _name_supported(value, request):
-                replaced[field] = None
+                replaced[field] = _stated_part(value, request)  # What was said, or nothing.
+        if intent.specialty and not _specialty_stated(intent.specialty, request):
+            replaced["specialty"] = None
         for field in ("start_date", "end_date", "new_date"):
             value = getattr(intent, field)
             if value and value.isoformat() not in dates:
@@ -344,6 +448,11 @@ class StructuredIntentExtractor:
         word = _SELECTION_WORDS.get(intent.selection)
         if word is not None and not word.search(request):
             replaced["selection"] = "UNSPECIFIED"
+        if intent.selection == "SPECIFIC_TIME":
+            # A named clock time is what makes a selection specific; without one it is nothing.
+            clock_kept = [f for f in ("time", "appointment_time") if getattr(intent, f)]
+            if not [f for f in clock_kept if f not in replaced]:
+                replaced["selection"] = "UNSPECIFIED"
         if intent.option_number is not None and not (
             _ORDINALS.search(request) and 1 <= intent.option_number <= 5
         ):
@@ -390,22 +499,7 @@ class StructuredIntentExtractor:
         return intent.model_copy(update=self.unsupported(intent, request, today, anchor))
 
     def _record(self, started: float, outcome: str, body: Mapping[str, Any] | None = None) -> None:
-        body = body or {}
-        duration = (self._timer() - started) * 1000
-        server_ns = body.get("total_duration")
-        self.usage.calls.append(
-            CallRecord(
-                duration_ms=duration,
-                outcome=outcome,
-                prompt_tokens=body.get("prompt_eval_count")
-                if isinstance(body.get("prompt_eval_count"), int)
-                else None,
-                output_tokens=body.get("eval_count")
-                if isinstance(body.get("eval_count"), int)
-                else None,
-                server_ms=server_ns / 1e6 if isinstance(server_ns, int) else None,
-            )
-        )
+        self.usage.calls.append(record_of((self._timer() - started) * 1000, outcome, body))
 
     @property
     def server_attested_replies(self) -> int:
@@ -438,11 +532,59 @@ def _day_label(local: str) -> str:
     return f"{day.strftime('%A')}, {MONTHS[day.month - 1].title()} {day.day}, {day.year}"
 
 
+def _relative_date_words(spec: str) -> str | None:
+    """Patient-facing wording for a date that still depends on the clinic's calendar."""
+    kind, _, rest = spec.partition(":")
+    if kind == "rel":
+        parts = rest.split(":")
+        if parts[0] == "dayafter":
+            return "the day after tomorrow"
+        if parts[0] == "plus" and len(parts) == 2:
+            return f"{parts[1]} days from today"
+        if len(parts) == 2 and parts[0] == "next":
+            return f"next {parts[1].title()}"
+        return parts[0].replace("_", " ")
+    if kind == "week":
+        return f"{rest} week"
+    if kind == "wkday":
+        scope, _, weekday = rest.partition(":")
+        return f"{weekday.title()} {scope} week"
+    return None
+
+
+def _when(first: date | None, last: date | None = None) -> str:
+    """ " on Monday, ..." for one day, " from ... to ..." for a stretch, empty for none."""
+    if first is None:
+        return ""
+    if last is None or last == first:
+        return f" on {_day_label(first.isoformat())}"
+    return f" from {_day_label(first.isoformat())} to {_day_label(last.isoformat())}"
+
+
 def _names(items: Sequence[str]) -> str:
     items = list(items)
     if len(items) <= 2:
         return " or ".join(items)
     return ", ".join(items[:-1]) + f", or {items[-1]}"
+
+
+def numbered_labels(labels: Sequence[str]) -> str:
+    return "; ".join(f"option {index}, {label}" for index, label in enumerate(labels, 1))
+
+
+def numbered_options(offers: Sequence[Offer]) -> str:
+    return numbered_labels([offer.label for offer in offers])
+
+
+def compact_numbered_labels(labels: Sequence[str]) -> str:
+    split = [label.partition(" on ") for label in labels]
+    if split and all(separator and details == split[0][2] for _, separator, details in split):
+        return f"on {split[0][2]}: {numbered_labels([clock for clock, _, _ in split])}"
+    return numbered_labels(labels)
+
+
+def compact_numbered_options(offers: Sequence[Offer]) -> str:
+    return compact_numbered_labels([offer.label for offer in offers])
 
 
 def _window_words(draft: Draft) -> str:
@@ -492,15 +634,161 @@ _OPERATION_WORDS = {
         re.IGNORECASE,
     ),
     "CANCEL": re.compile(
-        r"\b(cancel|call off|can'?t make|cannot make|won'?t be able|unable to (?:make|attend))\b",
+        r"\b(cancel|call off|scrap|drop|remove|delete|get rid of|can'?t make|cannot make|"
+        r"can'?t come|won'?t be able|unable to (?:make|attend))\b",
         re.IGNORECASE,
     ),
     "RESCHEDULE": re.compile(
         r"\b(reschedul\w*|mov(?:e|ing)|chang(?:e|ing)|push|switch|shift|postpone|"
-        r"another time|different time|later time|earlier time|instead)\b",
+        r"another time|different time|later time|earlier time)\b",
         re.IGNORECASE,
     ),
 }
+
+
+# What plainly asks for a booking. The wider list above is only a necessary condition (the words an
+# appointment request may contain); "any availability?", "are there openings?" and "can I see what
+# is free?" use those words to ask what exists. Only an act of booking is a request by wording
+# alone; anything else needs the reading to be vouched for (see `OrchestratedSession`).
+_BOOKING_ACT = re.compile(
+    r"\b(book(?:ing)?|schedule|reserve|set up|"
+    r"make (?:me |us )?(?:an?|the) (?:appointment|booking)|"
+    r"get (?:me |us )?(?:in|an appointment|a slot)(?! touch)|"
+    r"(?:fit|squeeze|work|pencil) (?:me|us) in|sign (?:me|us) up|put (?:me|us) down|"
+    r"(?:find|get|give) (?:me|us) (?:an?|something|someone)\b|"
+    # "Can I get an appointment…?", "Is it possible to get an appointment…?"
+    r"(?:can|could|may|might) (?:i|we) (?:please )?(?:get|have|make|book|schedule) (?:an?|the) "
+    r"(?:\w+ )?(?:appointment|visit|slot|time)|"
+    r"(?:is it|would it be) possible (?:to|for me to|for us to) (?:get|have|make|book|schedule)|"
+    r"(?:i'?m|we'?re|i am|we are) (?:looking|hoping|trying) (?:for (?:an? )?(?:appointment|visit)"
+    r"|to (?:book|schedule|get|come in|be seen|make|see (?:dr\b|doctor|someone|a doctor))))\b"
+    # A wish for an appointment is a request; a wish to know what exists is not.
+    r"|\b(?:i|we)(?:'d| would|'ll| will| need| want| wanna| have to)\b\s+"
+    r"(?!(?:like\s+)?(?:to\s+)?(?:know\b|ask\b|find out\b|check\b|hear\b|learn\b|confirm\b|"
+    r"see (?:what|if|whether|when|who|which|how|about|the (?:times|openings|slots|availability))))",
+    re.IGNORECASE,
+)
+
+
+# A request that is only the thing asked for: "An appointment at Linden Court on Monday". Not
+# when it asks whether one exists ("an appointment available Friday?").
+_NOUN_REQUEST = re.compile(
+    r"^\W*an?\s+(?:appointment|visit)\b(?!.*\b(?:available|availability|open|free|slots?|openings?)\b)"
+    r"[^?]*$",
+    re.IGNORECASE,
+)
+
+
+def operation_stated(operation: str, text: str) -> bool:
+    """Whether the wording itself plainly asks for the operation (no judgement of meaning)."""
+    if operation == "BOOK":
+        return bool(_BOOKING_ACT.search(text) or _NOUN_REQUEST.match(text))
+    pattern = _OPERATION_WORDS.get(operation)
+    return bool(pattern and pattern.search(text))
+
+
+def agreement_stated(text: str) -> bool:
+    """Whether the whole message is a plain "yes" (and nothing else)."""
+    return bool(_AGREEMENT.match(text))
+
+
+_AFFIRMATIVE = re.compile(
+    r"^\W*(?:yes|yeah|yep|yup|ok|okay|sure|alright|all right|absolutely|definitely|please|fine|"
+    r"great|perfect|sounds good|that works|that would be great|let'?s do it|go ahead|do it)\b",
+    re.IGNORECASE,
+)
+_EXISTING = re.compile(
+    r"\bmy\s+(?:\w+\s+){0,2}(?:appointment|booking|visit)s?\b|"
+    r"\b(?:existing|current|already (?:booked|scheduled))\s*(?:appointment|booking)?\b",
+    re.IGNORECASE,
+)
+
+
+def affirmative_stated(text: str) -> bool:
+    """Whether the message opens with a plain yes and is not a question: the reply to "Would you
+    like to book…?" that says so ("yes", "okay, Wednesday")."""
+    return bool(_AFFIRMATIVE.match(text)) and "?" not in text
+
+
+def refers_to_existing(text: str) -> bool:
+    """Whether the wording is about an appointment the patient already has ("my appointment on
+    the 10th"). Moving or cancelling needs that; a correction to a booking being arranged does
+    not."""
+    return bool(_EXISTING.search(text))
+
+
+def withdrawal_stated(text: str) -> bool:
+    """Whether the wording itself plainly drops the request ("never mind")."""
+    return bool(_ABANDON.search(text))
+
+
+def withdrawal_remainder(text: str) -> str:
+    """What the message says besides the withdrawal itself: "forget it, the heart center instead"
+    leaves "the heart center instead". A bare "never mind" leaves nothing."""
+    return re.sub(r"^[\W_]+|[\W_]+$", "", _ABANDON.sub(" ", text)).strip()
+
+
+# Words around a withdrawal that add nothing: "never mind, thanks" drops the request, "never mind,
+# the heart center instead" drops it for another.
+_POLITE = frozenset(
+    [
+        "the",
+        "at",
+        "ok",
+        "okay",
+        "please",
+        "one",
+        "works",
+        "is",
+        "fine",
+        "good",
+        "perfect",
+        "great",
+        "thanks",
+        "then",
+        "i'll",
+        "ill",
+        "take",
+        "go",
+        "for",
+        "with",
+        "make",
+        "it",
+        "that",
+        "sounds",
+        "let's",
+        "lets",
+        "do",
+        "a",
+        "an",
+        "um",
+        "uh",
+        "yes",
+        "yeah",
+        "sure",
+        "sorry",
+        "thank",
+        "you",
+        "actually",
+        "now",
+        "just",
+        "i",
+        "we",
+        "hmm",
+        "well",
+        "so",
+        "all",
+    ]
+)
+
+
+def withdrawal_adds(text: str) -> bool:
+    """Whether a message that withdraws the request also says something else (a replacement)."""
+    words = re.findall(r"[a-z0-9']+", withdrawal_remainder(text).casefold())
+    return any(w not in _POLITE for w in words)
+
+
+_OFFERED_CLOCK = re.compile(r"(\d{1,2}):(\d{2}) (AM|PM)")
 _TO_TIME = re.compile(r"\b(to|for|at)\s*$", re.IGNORECASE)
 _MERIDIEM = re.compile(r"\b([ap])\.?m\b", re.IGNORECASE)
 
@@ -527,6 +815,123 @@ def _meridiem_in(text: str, parts: set[str]) -> str | None:
 
 _DESTINATION = re.compile(r"\b(to|into|onto|for)\s*(the\s*)?$", re.IGNORECASE)
 _SOURCE = re.compile(r"\b(from|my)\s*(the\s*)?$", re.IGNORECASE)
+_MOVE_TO = re.compile(r"\b(?:to|into|onto)\b", re.IGNORECASE)  # Anywhere before: where it goes.
+
+# Words that hand the choice of time to the agent. A time of day ("morning") or a date phrase
+# ("next Monday") is a preference, not a choice: the patient is asked which exact time.
+_DELEGATION = {
+    "EARLIEST": re.compile(
+        r"\b(first|earliest|soonest|asap|as soon as|next (?:available|open|opening|appointment|"
+        r"slot|time))\b",
+        re.IGNORECASE,
+    ),
+    "ANY": re.compile(
+        r"\b(any ?time|any (?:available |open |free )?(?:time|day|slot|opening|appointment|"
+        r"morning|afternoon)s?|whenever|whatever (?:time|works|is)|doesn'?t matter|don'?t care|"
+        r"no preference|you pick|you choose|up to you|surprise me)\b",
+        re.IGNORECASE,
+    ),
+}
+_ANY_DOCTOR = re.compile(
+    r"\b(?:any|whichever|whoever|no preference (?:on|for|about) the)\s+"
+    r"(?:doctor|physician|provider|available doctor)s?\b|\bany ?one\b|"
+    r"\b(?:doesn'?t|does not) matter (?:which|who)\b",
+    re.IGNORECASE,
+)
+_NO_PREFERENCE = re.compile(
+    r"\b(any|anyone|whichever|whoever|doesn'?t matter|no preference|don'?t care|you pick|"
+    r"you choose|up to you)\b",
+    re.IGNORECASE,
+)
+_GENERIC_NAME = {
+    "any", "anyone", "anybody", "whoever", "whichever", "one", "available", "a", "the", "some",
+    "provider", "physician", "clinic", "clinics", "location", "office", "that", "this", "same",
+}  # fmt: skip
+_ROLE_WORDS = {
+    "general",
+    "practitioner",
+    "gp",
+    "family",
+    "primary",
+    "care",
+    "internal",
+    "specialist",
+}
+
+
+def _role_phrase(value: str | None) -> bool:
+    """ "General Physician", "family doctor": a kind of doctor, which a reading sometimes writes
+    in the place of a doctor's name. With "Dr." or any word beyond these, it is a name."""
+    words = re.findall(r"[a-z]+", (value or "").casefold())
+    allowed = _GENERIC_NAME | _ROLE_WORDS | {"doctor"}
+    return (
+        bool(words)
+        and "dr" not in words
+        and all(word in allowed for word in words)
+        and any(word in _ROLE_WORDS for word in words)
+    )
+
+
+_CLINIC_LIST = re.compile(
+    r"\b(?:which|what|list|show|tell me|name|any other|other|different|where are)\b[^.?!]{0,40}?"
+    r"\b(?:clinics|locations|offices|hospitals|centers|centres)\b"
+    r"|\b(?:which|what) clinic\b[^.?!]{0,30}"
+    r"\b(?:available|options?|choices?|do you have|are there)\b"
+    r"|\b(?:any|whichever|whatever|either) (?:clinic|location|office)\b",
+    re.IGNORECASE,
+)
+_DOCTOR_LIST = re.compile(
+    r"\b(?:which|what|list|show|who|tell me|name)\b[^.?!]{0,40}?"
+    r"\b(?:doctors|physicians|providers|specialists)\b"
+    r"|\b(?:which|what|who) (?:doctor|physician|provider)s? (?:is|are|do you have|can i)\b"
+    r"|\bwho can i see\b",
+    re.IGNORECASE,
+)
+_WHAT_IS_THERE = re.compile(
+    r"\bwhat (?:do you have|are my options|options (?:do i have|are there)|is available)\b",
+    re.IGNORECASE,
+)
+_MORE_OPTIONS = re.compile(
+    r"\b(?:more|next|other|additional)\s+(?:options?|times?|openings?|slots?)\b|"
+    r"\b(?:show|give|tell)\s+me\s+more\b",
+    re.IGNORECASE,
+)
+_WEEK = re.compile(r"\b(next|this|the coming|the following)\s+week\b", re.IGNORECASE)
+LIST_LIMIT = 6
+SOONEST_DAYS = 14  # How far ahead "whatever is soonest" looks.
+
+
+def more_options_requested(text: str) -> bool:
+    return bool(_MORE_OPTIONS.search(text))
+
+
+def _week_span(spec: str, today: date) -> tuple[date, date]:
+    """The days a week phrase means on `today`'s calendar: "week:next", "week:this", or one named
+    day of such a week ("wkday:next:tuesday")."""
+    kind, _, rest = spec.partition(":")
+    scope, _, name = rest.partition(":")
+    monday = today - timedelta(days=today.weekday())
+    if scope == "next":
+        monday += timedelta(days=7)
+    if kind == "wkday":
+        day = monday + timedelta(days=WEEKDAYS.index(name))
+        return day, day
+    return (today if scope == "this" else monday), monday + timedelta(days=6)
+
+
+_ARTICLE = re.compile(r"^(?:the|a|an|our|my)\s+", re.IGNORECASE)
+
+
+def search_name(name: str) -> str:
+    """A name as the directory is searched for it: "the heart center" looks for Heart Center."""
+    return re.sub(r"['\u2019]s\b", "", _ARTICLE.sub("", name.strip())).strip() or name
+
+
+def _generic_name(value: str | None) -> bool:
+    """ "any doctor", "whichever clinic": words that stand for no name at all."""
+    tokens = _name_tokens(value or "")
+    return not tokens or all(token in _GENERIC_NAME for token in tokens)
+
 
 CREDENTIAL_NOTICE = (
     "For your security, please don't share a PIN, password, or login code here, and I will never "
@@ -583,6 +988,10 @@ class HybridControllerModel:
         self._chosen_date: tuple[str, str] | None = None
         self._chosen_meridiem: str | None = None
         self._ask_part = False
+        self.hints = PlannerHints()
+        self.operation_vouched = False  # The graph's reading vouches for an unspoken BOOK.
+        self.replacing = False  # The message drops the request and states its replacement.
+        self._listing: tuple[bool, bool, str] | None = None  # (clinics, doctors, text)
         self.local_today: date | None = None
         self._reset_plan()
 
@@ -591,12 +1000,38 @@ class HybridControllerModel:
         self.doctor_id: str | None = None
         self.current: Mapping[str, Any] | None = None
         self.chosen: Mapping[str, Any] | None = None
+        self.auto_pick = ""  # Why a time was chosen without being named: "earliest" or "only".
         self._probing = False
         self._replans = 0
+        self._searched: dict[str, Any] = {}  # The arguments of the last availability search.
+        self._diagnosis: str | None = None  # "unfiltered" or "ahead": why a search came back empty.
 
     @property
     def intent(self) -> PatientIntent | None:
         return self.state.draft
+
+    # -- what a planner outside the controller may ask of it, without touching its state ----------
+
+    def context(self) -> str:
+        """The question being waited on and the request so far, as the extractor is told them."""
+        return self._context()
+
+    def pin_day(self, iso: str) -> None:
+        """The day a pick named: the next merge takes it as the day, whatever else the words say
+        ("I'll take Friday" after being shown next week's Friday is that Friday)."""
+        self._chosen_date = ("start", iso)
+
+    def resume_prompt(self) -> str:
+        """The unanswered question again, or the prompt that fits the state."""
+        return self._resume()
+
+    @staticmethod
+    def screens_secret(text: str) -> bool:
+        """Whether the message holds a credential, or digits that may be one: it is never sent
+        to a model."""
+        return bool(
+            _CREDENTIAL.search(text) or _DIGITS_ONLY.match(text) or _SPOKEN_DIGITS.match(text)
+        )
 
     # -- the Model protocol -------------------------------------------------------------------
 
@@ -638,6 +1073,7 @@ class HybridControllerModel:
     def _begin_turn(self, text: str):
         state = self.state
         text = text.strip()
+        self._listing = None
         state.turns += 1
         if state.turns > MAX_TURNS_PER_SESSION:
             state.reset()
@@ -647,10 +1083,36 @@ class HybridControllerModel:
             return self._ask_again("Sorry, I didn't get a message.")
         if _CREDENTIAL.search(text) or _DIGITS_ONLY.match(text) or _SPOKEN_DIGITS.match(text):
             return self._say(CREDENTIAL_NOTICE)  # Never read, stored, or sent to the model.
-        if _AGREEMENT.match(text):
+        # A draft the graph already settled from what was offered ("book it", said of the one
+        # opening listed) is a request to act on, not a bare "yes".
+        settled = (
+            state.draft is not None
+            and state.prepared is None
+            and state.awaiting == Awaiting.NOTHING
+            and self.operation_vouched
+        )
+        if _AGREEMENT.match(text) and not settled:
             return self._agreement()
-        if _ABANDON.search(text) and len(text.split()) <= 8 and self._in_progress():
+        if (
+            more_options_requested(text)
+            and state.draft is not None
+            and state.awaiting in (Awaiting.DATE, Awaiting.TIME)
+            and state.offered
+        ):
+            state.offer_offset += len(state.offered)
+            state.prepared = None
+            self._reset_plan()
+            return self._plan()
+        if (
+            _ABANDON.search(text)
+            and len(text.split()) <= 8
+            and self._in_progress()
+            and not self.replacing
+            and not withdrawal_adds(text)  # "scratch that, tomorrow at 11" drops nothing.
+        ):
             return self._abandon()
+        if listing := self._directory_question(text):
+            return self._list_directory(*listing, text)
         intent = self._read(text)  # The model reads the patient's own words, names included.
         if not self._has_content(intent) and not self._schedule_words(text):
             if intent.message_type == "ABANDON":
@@ -662,6 +1124,117 @@ class HybridControllerModel:
             if self._degraded:
                 return self._ask_again("Sorry, I didn't quite catch that.")
         return self._continue(intent, text)
+
+    def _directory_question(self, text: str) -> tuple[bool, bool] | None:
+        """(clinics, doctors) when the patient asks what the directory holds: "which clinics are
+        available?", "who are the doctors?", "any clinic is fine". Read from the words, so it is
+        the same with or without the model, and it never ends the request in progress."""
+        clinics = bool(_CLINIC_LIST.search(text))
+        doctors = bool(_DOCTOR_LIST.search(text))
+        awaiting = self.state.awaiting
+        asked_what = bool(_WHAT_IS_THERE.search(text))
+        shrug = bool(_NO_PREFERENCE.search(text)) and len(text.split()) <= 6 and "?" not in text
+        if asked_what or shrug:  # Asked of a clinic question, it is about clinics.
+            clinics = clinics or awaiting in (Awaiting.CLINIC, Awaiting.CLINIC_CHOICE)
+        if asked_what:
+            doctors = doctors or awaiting == Awaiting.DOCTOR
+        return (clinics, doctors) if clinics or doctors else None
+
+    def _list_directory(self, clinics: bool, doctors: bool, text: str):
+        """Ask the directory what it holds. The request in progress is kept as it was."""
+        state = self.state
+        draft = state.draft
+        if self._schedule_words(text) and state.prepared is None:
+            # "Which clinics have mornings on Monday?" also says when: keep that for the booking.
+            said = self._read(text)
+            if (draft is None and said.operation == "BOOK") or (
+                draft is not None and draft.operation == "BOOK"
+            ):
+                self._merge(
+                    said.model_copy(update={"clinic_name": None, "doctor_name": None}), text
+                )
+        self._listing = (clinics, doctors, text)
+        return self._emit("search_clinic_directory", {"browse": True})
+
+    def _after_listing(self, result: Mapping[str, Any]):
+        assert self._listing is not None
+        clinics, doctors, text = self._listing
+        self._listing = None
+        data = result.get("data") or {}
+        shown = []
+        if not result.get("ok"):
+            shown.append("I couldn't look up the list just now.")
+        else:
+            found = list(data.get("clinics") or [])
+            people = list(data.get("doctors") or [])
+            draft = self.state.draft
+            lowered = text.casefold()
+            wanted = _text(draft.clinic_name) if draft is not None else ""
+            scope = [c for c in found if _text(c.get("name")) in lowered] or [
+                c for c in found if wanted and wanted == _text(c.get("name"))
+            ]
+            if scope and doctors:
+                ids = {c.get("clinic_id") for c in scope}
+                people = [
+                    d
+                    for d in people
+                    if any(c.get("clinic_id") in ids for c in d.get("clinics", []))
+                ]
+            more = (
+                " There are more; ask me about a particular one." if data.get("next_cursor") else ""
+            )
+            if clinics or not doctors:
+                shown.append(self._clinic_list(found) + (more if not doctors else ""))
+            if doctors:
+                at = f" at {_names([str(c['name']) for c in scope])}" if scope else ""
+                shown.append(self._doctor_list(people, at) + more)
+        shown.append(self._resume())
+        return self._say(" ".join(shown))
+
+    @staticmethod
+    def _clinic_list(clinics: list[Mapping[str, Any]]) -> str:
+        if not clinics:
+            return "I don't see any clinics listed right now."
+        items = [
+            f"{c['name']} in {c['city']}" if c.get("city") else str(c["name"])
+            for c in clinics[:LIST_LIMIT]
+        ]
+        extra = f", and {len(clinics) - LIST_LIMIT} more" if len(clinics) > LIST_LIMIT else ""
+        return f"These clinics are available: {', '.join(items)}{extra}."
+
+    @staticmethod
+    def _doctor_list(doctors: list[Mapping[str, Any]], where: str) -> str:
+        if not doctors:
+            return f"I don't see any doctors listed{where} right now."
+        items = []
+        for d in doctors[:LIST_LIMIT]:
+            places = _names([str(c["name"]) for c in d.get("clinics", [])])
+            entry = (
+                f"{d['display_name']} ({d['specialty']})"
+                if d.get("specialty")
+                else str(d["display_name"])
+            )
+            items.append(entry if where or not places else f"{entry} at {places}")
+        extra = f", and {len(doctors) - LIST_LIMIT} more" if len(doctors) > LIST_LIMIT else ""
+        return f"These doctors are available{where}: {', '.join(items)}{extra}."
+
+    def _resume(self) -> str:
+        """Back to what was being asked, unchanged: the list was an aside."""
+        state = self.state
+        if state.prepared is not None:
+            return (
+                "Your earlier review is still waiting: press Confirm in the app, or tell me what "
+                "you'd like to change."
+            )
+        if state.awaiting != Awaiting.NOTHING and state.last_question:
+            question = state.last_question
+            for ending in ("Which clinic would you like?", "Which date would you like?"):
+                if question.endswith(ending):
+                    return ending  # Without the hint and the summary the patient has just heard.
+            return question
+        if state.draft is not None and (missing := self._missing(state.draft)):
+            return self._ask(*missing).text
+        return "Would you like to book, move, or cancel an appointment?"
 
     @staticmethod
     def _schedule_words(text: str) -> bool:
@@ -743,6 +1316,8 @@ class HybridControllerModel:
             update["clinic_name"] = text.strip(" .!?")  # The directory search checks it.
         if awaiting == Awaiting.DOCTOR and short_answer:
             update["doctor_name"] = text.strip(" .!?")
+        if awaiting == Awaiting.SPECIALTY and short_answer and not _NO_PREFERENCE.search(text):
+            update["specialty"] = text.strip(" .!?")
         if ordinal := _ORDINALS.search(text):
             word = ordinal.group(1).casefold()
             digits = re.search(r"\d", word)
@@ -788,6 +1363,8 @@ class HybridControllerModel:
         return self._say(f"Okay, I've dropped that request and nothing was changed.{note}")
 
     def _off_topic(self):
+        if self.hints.keep_goal:
+            return self._say(f"{SCOPE_NOTICE} {self._resume()}")
         dropped = self._in_progress()
         self.state.reset()
         self._reset_plan()
@@ -809,6 +1386,7 @@ class HybridControllerModel:
         before = state.draft.model_copy() if state.draft is not None else None
         had_prepared = state.prepared
         self._merge(intent, text)
+        state.offer_offset = 0
         if had_prepared and state.draft == before:
             state.prepared = had_prepared
             return self._say(
@@ -816,6 +1394,10 @@ class HybridControllerModel:
                 "app, or tell me what you'd like to change."
             )
         state.prepared = None  # Anything new makes the earlier preparation out of date.
+        if state.draft is not None:
+            acts = self.operation_vouched or operation_stated(state.draft.operation, text)
+            if acts and not state.draft.vouched:
+                state.draft = state.draft.model_copy(update={"vouched": True})
         self._reset_plan()  # Fresh tool calls: nothing found earlier is reused.
         if self._pending_pin is not None:
             kind, key = self._pending_pin
@@ -829,14 +1411,50 @@ class HybridControllerModel:
         draft: PatientIntent | None = state.draft
         # An operation needs words in the message that mean it; otherwise it is not a change.
         operation = delta.operation
-        if operation != "UNKNOWN" and not _OPERATION_WORDS[operation].search(text):
+        if (
+            operation != "UNKNOWN"
+            and not self.operation_vouched
+            and not _OPERATION_WORDS[operation].search(text)
+        ):
             self.recoveries.append("operation_without_words")
             operation = "UNKNOWN"
+        hints = self.hints
+        if (
+            hints.same_request
+            and draft is not None
+            and draft.operation == "BOOK"
+            and operation == "RESCHEDULE"
+        ):
+            operation = (
+                "UNKNOWN"  # "Make it Thursday instead" corrects the booking; it moves nothing.
+            )
+        carrying = bool(
+            draft is None
+            and (hints.carry_clinic or hints.carry_date or hints.carry_window or hints.carry_doctor)
+        )
+        if carrying and operation == "UNKNOWN" and self._schedule_words(text):
+            operation = "BOOK"  # "I'll take 2 PM", said right after being shown the openings.
+        if (
+            hints.start_booking
+            and operation == "UNKNOWN"
+            and (draft is None or draft.operation == "UNKNOWN")
+            and (self._schedule_words(text) or delta.clinic_name)
+        ):
+            operation = "BOOK"  # "Pine Clinic Monday 9:30": an appointment asked for, unsaid.
         fresh = draft is None or (
             operation != "UNKNOWN" and draft.operation not in ("UNKNOWN", operation)
         )
         if fresh:
             draft = Draft(operation=operation)
+            if carrying and operation == "BOOK":
+                draft = draft.model_copy(
+                    update={
+                        "clinic_name": hints.carry_clinic,
+                        "doctor_name": hints.carry_doctor,
+                        "start_date": hints.carry_date,
+                        "end_date": hints.carry_date,
+                    }
+                )
             state.offered, state.awaiting = [], Awaiting.NOTHING
             state.pin_appointment = state.pin_slot = None
         elif draft.operation == "UNKNOWN" and operation != "UNKNOWN":
@@ -845,9 +1463,34 @@ class HybridControllerModel:
         update: dict[str, Any] = {}
         self._pending_pin = None
         self._resolve_choice(delta, draft, update)
+        role = delta.doctor_name if _role_phrase(delta.doctor_name) else None
         for field in ("clinic_name", "doctor_name", "specialty", "time", "appointment_time"):
-            if getattr(delta, field):
-                update[field] = getattr(delta, field)
+            value = getattr(delta, field)
+            if field == "doctor_name" and role:
+                continue  # A kind of doctor, not a doctor: handled as the specialty below.
+            if value and not (field in ("clinic_name", "doctor_name") and _generic_name(value)):
+                update[field] = value  # "any doctor" names nobody.
+        if role and not update.get("specialty"):
+            update["specialty"] = role
+        if not update.get("doctor_name") and (
+            _ANY_DOCTOR.search(text)
+            or (
+                state.awaiting == Awaiting.DOCTOR
+                and _NO_PREFERENCE.search(text)
+                and len(text.split()) <= 6
+            )
+        ):
+            update["doctor_name"] = None  # Any doctor will do: stop looking for the named one.
+        if (
+            state.awaiting == Awaiting.SPECIALTY
+            and not update.get("specialty")
+            and (
+                _ANY_DOCTOR.search(text) or (_NO_PREFERENCE.search(text) and len(text.split()) <= 6)
+            )
+        ):
+            update["specialty"] = (
+                None  # The patient chose to drop the filter they were asked about.
+            )
         # A clock time answers the question that was asked: "the 10 AM one" to "which time?" is a
         # time, and to "which appointment?" it names an appointment.
         if state.awaiting == Awaiting.TIME and delta.appointment_time and not delta.time:
@@ -860,6 +1503,12 @@ class HybridControllerModel:
         )
         if changed_clinic and not delta.doctor_name:
             update["doctor_name"] = None  # A doctor belongs to one clinic.
+        if (
+            update.get("specialty")
+            and not delta.doctor_name
+            and _text(update["specialty"]) != _text(draft.specialty)
+        ):
+            update["doctor_name"] = None  # "Actually the cardiologist" replaces the doctor named.
         self._ambiguous_date = None
         self._ask_part = False
         # Dates and times are read from the words with the names removed (a clinic called "Tomorrow
@@ -873,10 +1522,13 @@ class HybridControllerModel:
         self._merge_times(delta, scan, draft, update)
         if delta.time_preference != "ANYTIME":
             update["time_preference"] = delta.time_preference
-        if delta.selection == "SPECIFIC_TIME" and not delta.time and delta.appointment_time:
+        selection = delta.selection
+        if selection in _DELEGATION and not _DELEGATION[selection].search(scan):
+            selection = "UNSPECIFIED"  # "Monday morning" leaves the time to the patient.
+        if selection == "SPECIFIC_TIME" and not delta.time and delta.appointment_time:
             pass  # The clock time names an existing appointment, not the time wanted.
-        elif delta.selection != "UNSPECIFIED":
-            update["selection"] = delta.selection
+        elif selection != "UNSPECIFIED":
+            update["selection"] = selection
         elif update.get("time"):
             update["selection"] = "SPECIFIC_TIME"
         elif _SELECTION_WORDS["EARLIEST"].search(scan) and (
@@ -914,6 +1566,16 @@ class HybridControllerModel:
         spec_of = {m.iso: m.spec for m in found if m.iso}
         start, end, new = delta.start_date, delta.end_date, delta.new_date
         chosen, self._chosen_date = self._chosen_date, None
+        chosen = chosen or self._offered_day(found)
+        week = _WEEK.search(text) if draft.operation == "BOOK" and not chosen else None
+        if week:
+            named = [m.spec.rpartition(":")[2] for m in found if m.spec.startswith("rel:")]
+            if not found or (len(found) == 1 and named and named[0] in WEEKDAYS):
+                scope = "this" if week.group(1).casefold() == "this" else "next"
+                spec = f"wkday:{scope}:{named[0]}" if named else f"week:{scope}"
+                first, last = _week_span(spec, self._today())
+                update.update(start_date=first, end_date=last, start_spec=spec)
+                return
         mention: dict[str, DateMention | None] = {"start": None, "new": None}
         if chosen:
             mention[chosen[0]] = DateMention(0, chosen[1])
@@ -955,6 +1617,28 @@ class HybridControllerModel:
             update["new_date"] = new
             update["new_spec"] = spec_of.get(new.isoformat(), "")
 
+    def _offered_day(self, found: list[DateMention]) -> tuple[str, str] | None:
+        """A weekday said to "which day?" (or after being shown a week) means the day in what was
+        offered or shown that falls on it."""
+        if len(found) != 1:
+            return None
+        name = found[0].spec.rpartition(":")[2]
+        if not found[0].spec.startswith("rel:") or name not in WEEKDAYS:
+            return None
+        if self.state.awaiting == Awaiting.DATE:
+            days = [
+                date.fromisoformat(o.key.partition(":")[2])
+                for o in self.state.offered
+                if o.key.startswith("start:")
+            ]
+        elif self.hints.carry_window and self.state.draft is None:
+            first, last = self.hints.carry_window
+            days = [first + timedelta(days=n) for n in range((last - first).days + 1)]
+        else:
+            return None
+        same = [day.isoformat() for day in days if day.weekday() == WEEKDAYS.index(name)]
+        return ("start", same[0]) if len(same) == 1 else None
+
     def _merge_times(self, delta: PatientIntent, text: str, draft: Draft, update: dict) -> None:
         """The clock times and parts of the day the message states, read from its own words.
 
@@ -981,6 +1665,8 @@ class HybridControllerModel:
             if role is None:
                 continue
             minutes = minutes_of_mention(mention, parts)
+            if minutes is None and role == "time":
+                minutes = self._offered_clock(mention)
             if minutes is None:
                 update["pending_clock"] = f"{role}:{mention.hour}:{mention.minute:02d}"
                 break
@@ -998,6 +1684,20 @@ class HybridControllerModel:
         if parts & {"evening", "night"} and not mentions:
             self._ask_part = True
 
+    def _offered_clock(self, mention: ClockMention) -> int | None:
+        """A bare "9:30" said to "which time?" is the one offered time that reads that way."""
+        if self.state.awaiting != Awaiting.TIME:
+            return None
+        wanted = (mention.hour % 12) * 60 + mention.minute
+        offered = set()
+        for offer in self.state.offered:
+            said = _OFFERED_CLOCK.match(offer.label)
+            if said:
+                hour = int(said[1]) % 12 + (12 if said[3] == "PM" else 0)
+                offered.add(hour * 60 + int(said[2]))
+        fits = {m for m in offered if m % 720 == wanted}
+        return fits.pop() if len(fits) == 1 else None
+
     def _clock_role(self, text: str, mention: ClockMention, draft: Draft) -> str | None:
         """What a clock time in the message is for, or None when the words do not say."""
         if mention.kind in ("after", "before"):
@@ -1006,8 +1706,10 @@ class HybridControllerModel:
             return "time"
         if draft.operation == "CANCEL":
             return "appt"
-        if draft.operation == "RESCHEDULE" and _TO_TIME.search(text[: mention.start]):
-            return "time"
+        if draft.operation == "RESCHEDULE" and (
+            _TO_TIME.search(text[: mention.start]) or _MOVE_TO.search(text[: mention.start])
+        ):
+            return "time"  # "move it to the 12th at 2": where it goes, and when.
         return None
 
     @staticmethod
@@ -1058,7 +1760,7 @@ class HybridControllerModel:
             return self._ask(*missing)
         self.state.awaiting = Awaiting.NOTHING
         if draft.operation == "BOOK":
-            arguments: dict[str, Any] = {"clinic_name": draft.clinic_name}
+            arguments: dict[str, Any] = {"clinic_name": search_name(draft.clinic_name)}
             if draft.doctor_name:
                 arguments["doctor_name"] = draft.doctor_name
             return self._emit("search_clinic_directory", arguments)
@@ -1077,10 +1779,29 @@ class HybridControllerModel:
             return self._date_question(*self._ambiguous_date)
         if draft.operation == "BOOK":
             if not draft.clinic_name:
-                return Awaiting.CLINIC, "Which clinic would you like?"
+                return (
+                    Awaiting.CLINIC,
+                    f"{self._heard(draft)}You can ask me which clinics are available. "
+                    "Which clinic would you like?",
+                )
+            if not draft.start_date and draft.selection == "EARLIEST":
+                # "Whatever is soonest": the first opening in the next two weeks, said so in the
+                # review. The days are read again on the clinic's calendar once it is known.
+                today = self._today()
+                self.state.draft = draft = draft.model_copy(
+                    update={
+                        "start_date": today,
+                        "end_date": today + timedelta(days=SOONEST_DAYS - 1),
+                        "start_spec": f"soon:{SOONEST_DAYS}",
+                    }
+                )
             if not draft.start_date:
-                return Awaiting.DATE, "Which date would you like?"
-        if draft.pending_clock:
+                return (
+                    Awaiting.DATE,
+                    f"{self._heard(draft)}A day like 'tomorrow' or 'Tuesday', or 'next week', "
+                    "works. Which date would you like?",
+                )
+        if draft.pending_clock and not self._clock_checkable(draft):
             return self._clock_question(draft.pending_clock)
         if self._ask_part:
             return (
@@ -1098,6 +1819,61 @@ class HybridControllerModel:
         ):
             return Awaiting.APPOINTMENT, "Which appointment would you like to move, and to when?"
         return None
+
+    @staticmethod
+    def _heard(draft: Draft) -> str:
+        """What the request holds so far, as a sentence to put before the next question."""
+        known = []
+        if draft.clinic_name:
+            known.append(f"at {draft.clinic_name}")
+        if draft.doctor_name:
+            known.append(f"with {draft.doctor_name}")
+        elif draft.specialty and draft.operation == "BOOK":
+            known.append(f"for {draft.specialty}")
+        relative_words = _relative_date_words(draft.start_spec)
+        if relative_words:
+            known.append(f"for {relative_words}")
+        elif draft.start_date:
+            last = draft.end_date or draft.start_date
+            first = _day_label(draft.start_date.isoformat())
+            known.append(
+                f"on {first}"
+                if last == draft.start_date
+                else f"from {first} to {_day_label(last.isoformat())}"
+            )
+        if draft.time:
+            known.append(f"at {draft.time}")
+        elif draft.time_preference != "ANYTIME":
+            known.append(f"in the {draft.time_preference.lower()}")
+        # What the patient is asking for, never a statement that an appointment exists.
+        kind = {
+            "BOOK": "a request to book an appointment",
+            "RESCHEDULE": "a request to move an appointment",
+            "CANCEL": "a request to cancel an appointment",
+        }.get(str(draft.operation), "a request for an appointment")
+        return f"So far I have {kind} {' '.join(known)}. " if known else ""
+
+    @staticmethod
+    def _clock_checkable(draft: Draft) -> bool:
+        """A time said without am or pm can be settled by the schedule itself, once there is one to
+        look at: if only one of the two readings is open, that is the one meant."""
+        role = str(draft.pending_clock).partition(":")[0]
+        return role == "time" and (
+            draft.operation == "RESCHEDULE" or bool(draft.clinic_name and draft.start_date)
+        )
+
+    def _settle_pending_clock(self, draft: Draft, slots: list[Mapping[str, Any]]):
+        """Use the open slots to read a bare clock time: None if settled, else the question."""
+        _, hour, minute = str(draft.pending_clock).split(":")
+        wanted = (int(hour) % 12) * 60 + int(minute)
+        fits = sorted({_minutes(str(s["starts_at_local"])) for s in slots} & {wanted, wanted + 720})
+        if len(fits) == 1:
+            self.auto_pick = "clock"
+            self.state.draft = draft.model_copy(
+                update={"time": label(fits[0]), "selection": "SPECIFIC_TIME", "pending_clock": None}
+            )
+            return None
+        return self._ask(*self._clock_question(str(draft.pending_clock)))
 
     @staticmethod
     def _date_question(field: str, mention: DateMention) -> tuple[Awaiting, str, list[Offer]]:
@@ -1156,6 +1932,16 @@ class HybridControllerModel:
             spec, current = getattr(draft, spec_field), getattr(draft, date_field)
             if not spec:
                 continue
+            if spec.startswith("soon:"):
+                first, last = today, today + timedelta(days=int(spec[5:]) - 1)
+                if date_field == "start_date" and (current, draft.end_date) != (first, last):
+                    update.update(start_date=first, end_date=last)
+                continue
+            if spec.startswith(("week:", "wkday:")):
+                first, last = _week_span(spec, today)
+                if date_field == "start_date" and (current, draft.end_date) != (first, last):
+                    update.update(start_date=first, end_date=last)
+                continue
             resolved = resolve_spec(spec, today)
             if len(resolved) == 2:
                 field = date_field.removesuffix("_date")
@@ -1177,6 +1963,10 @@ class HybridControllerModel:
 
     def _consume(self, result: Mapping[str, Any]):
         tool = self.issued[-1]
+        if self._listing is not None and tool == "search_clinic_directory":
+            return self._after_listing(result)
+        if self._diagnosis is not None and tool == "search_appointment_availability":
+            return self._diagnose(result)
         if not result.get("ok"):
             return self._failed(tool, result)
         data = result.get("data") or {}
@@ -1193,6 +1983,20 @@ class HybridControllerModel:
     def _after_directory(self, data: Mapping[str, Any]):
         draft = self.state.draft
         assert draft is not None
+        if self._probing:
+            stated = _name_tokens(draft.doctor_name or "")
+            owner = [
+                c
+                for c in data.get("clinics") or []
+                if stated and all(word in _name_tokens(str(c.get("name"))) for word in stated)
+            ]
+            if len(owner) == 1:
+                # The "doctor" is the rest of the clinic's own name, split off by mistake.
+                self._probing = False
+                self.state.draft = draft = draft.model_copy(
+                    update={"clinic_name": str(owner[0]["name"]), "doctor_name": None}
+                )
+                data = {"clinics": owner, "doctors": []}
         if self._probing:
             return self._ask(
                 Awaiting.DOCTOR,
@@ -1229,6 +2033,11 @@ class HybridControllerModel:
                     offers,
                 )
             self.doctor_id = str(doctors[0]["doctor_id"])
+            if draft.specialty:
+                # A real doctor has been chosen by name. A specialty asked for earlier no longer
+                # narrows the search, and the doctor is named in everything said back. (A name that
+                # matches nobody chooses no one, so it never removes the specialty.)
+                self.state.draft = draft = draft.model_copy(update={"specialty": None})
         asked = self._localize(self.clinic.get("timezone"))
         if asked is not None:
             return asked
@@ -1283,14 +2092,12 @@ class HybridControllerModel:
             arguments["specialty"] = draft.specialty
         if draft.time_preference != "ANYTIME":
             arguments["time_preference"] = draft.time_preference
+        self._searched = dict(arguments)
         return self._emit("search_appointment_availability", arguments)
 
-    def _after_appointments(self, data: Mapping[str, Any]):
-        draft = self.state.draft
-        assert draft is not None
-        identifying = minutes_of(draft.appointment_time) if draft.appointment_time else None
-        if identifying is None and draft.operation == "CANCEL":
-            identifying = minutes_of(draft.time) if draft.time else None
+    def _matching_appointments(self, data: Mapping[str, Any], draft: Draft, identifying):
+        """The patient's appointments that fit what was said, or the question to ask when a date
+        phrase has two readings."""
         found = []
         for item in data.get("appointments", []):
             if draft.start_spec:
@@ -1315,6 +2122,25 @@ class HybridControllerModel:
             if identifying is not None and _minutes(str(item["starts_at_local"])) != identifying:
                 continue
             found.append(item)
+        return found
+
+    def _after_appointments(self, data: Mapping[str, Any]):
+        draft = self.state.draft
+        assert draft is not None
+        identifying = minutes_of(draft.appointment_time) if draft.appointment_time else None
+        if identifying is None and draft.operation == "CANCEL":
+            identifying = minutes_of(draft.time) if draft.time else None
+        found = self._matching_appointments(data, draft, identifying)
+        if not found and identifying is not None and draft.operation == "RESCHEDULE":
+            # The clock time names none of their appointments, so it is the time they want.
+            found = self._matching_appointments(data, draft, None)
+            if found:
+                moved = {"appointment_time": None}
+                if not draft.time:
+                    moved |= {"time": draft.appointment_time, "selection": "SPECIFIC_TIME"}
+                self.state.draft = draft = draft.model_copy(update=moved)
+        if isinstance(found, Say):
+            return found
         if self.state.pin_appointment is not None:
             same = [i for i in found if str(i.get("appointment_id")) == self.state.pin_appointment]
             found = same or found
@@ -1381,6 +2207,12 @@ class HybridControllerModel:
                 slots = [s for s in slots if _before(now, s)]
             elif draft.selection == "EARLIER":
                 slots = [s for s in slots if _before(s, now)]
+        if draft.pending_clock and str(draft.pending_clock).startswith("time:"):
+            question = self._settle_pending_clock(draft, slots)
+            if question is not None:
+                return question
+            draft = self.state.draft
+            assert draft is not None
         before_window = slots
         if draft.not_before is not None:
             slots = [s for s in slots if _minutes(str(s["starts_at_local"])) >= draft.not_before]
@@ -1410,21 +2242,29 @@ class HybridControllerModel:
         return self._emit("prepare_appointment_action", arguments)
 
     def _slot_offers(self, slots: Sequence[Mapping[str, Any]]) -> list[Offer]:
-        days = {str(s["starts_at_local"])[:10] for s in slots}
-        doctors = {str((s.get("doctor") or {}).get("doctor_id")) for s in slots}
+        offset = self.state.offer_offset
+        shown = slots[offset : offset + SPOKEN_OPTION_LIMIT]
         offers = []
-        for slot in slots[:5]:
-            label = _clock(str(slot["starts_at_local"]))
-            if len(days) > 1:
-                label = f"{label} on {_day_label(str(slot['starts_at_local']))}"
-            if len(doctors) > 1:
-                label += f" with {(slot.get('doctor') or {}).get('display_name', '')}"
+        for slot in shown:
+            local = str(slot["starts_at_local"])
+            label = f"{_clock(local)} on {_day_label(local)}"
+            doctor = str((slot.get("doctor") or {}).get("display_name", ""))
+            if doctor:
+                label += f" with {doctor}"
             offers.append(Offer(label, str(slot["slot_id"])))
         if len({o.label for o in offers}) < len(offers):
             # The same clock time twice in one day: the hour the clocks go back. Tell them apart.
             offers = [
-                Offer(f"{o.label} (UTC{str(slot['starts_at_local'])[-6:]})", o.key)
-                for o, slot in zip(offers, slots, strict=False)
+                Offer(
+                    o.label.replace(
+                        _clock(str(slot["starts_at_local"])),
+                        f"{_clock(str(slot['starts_at_local']))} "
+                        f"(UTC{str(slot['starts_at_local'])[-6:]})",
+                        1,
+                    ),
+                    o.key,
+                )
+                for o, slot in zip(offers, shown, strict=False)
             ]
         return offers
 
@@ -1436,9 +2276,9 @@ class HybridControllerModel:
             where = (self.clinic or (self.current or {}).get("clinic") or {}).get(
                 "name", "that clinic"
             )
-            when = f" on {_day_label(draft.start_date.isoformat())}" if draft.start_date else ""
+            when = _when(draft.start_date, draft.end_date)
             if draft.operation == "RESCHEDULE" and draft.new_date:
-                when = f" on {_day_label(draft.new_date.isoformat())}"
+                when = _when(draft.new_date)
             return self._ask(
                 Awaiting.DATE,
                 f"I don't see any matching openings at {where}{when}. "
@@ -1450,8 +2290,6 @@ class HybridControllerModel:
                 return chosen[0]
             self.state.pin_slot = None
         selection = draft.selection
-        if selection == "UNSPECIFIED" and draft.time_preference != "ANYTIME":
-            selection = "ANY"
         offers = self._slot_offers(slots)
         if selection == "SPECIFIC_TIME":
             wanted = minutes_of(draft.time)
@@ -1473,13 +2311,77 @@ class HybridControllerModel:
                 "Which would you like?",
                 offers,
             )
-        if selection in ("EARLIEST", "ANY", "LATER", "EARLIER") or len(slots) == 1:
+        if selection == "EARLIEST":
+            # An explicit delegation counts only when it resolves to exactly one opening: two
+            # doctors free at the same earliest time is a question, not a choice made for them.
+            first = min(str(s["starts_at_utc"]) for s in slots)
+            earliest = [s for s in slots if str(s["starts_at_utc"]) == first]
+            if len(earliest) == 1:
+                self.auto_pick = "earliest"  # The patient left the time to us, and is told so.
+                return earliest[0]
+            offers = self._slot_offers(earliest)
+            return self._ask(
+                Awaiting.TIME,
+                f"{_names([o.label for o in offers])} are all the earliest. Which would you like?",
+                offers,
+            )
+        if len(slots) == 1:
+            self.auto_pick = "only"
             return slots[0]
+        # A time of day or a stretch of days is a preference, not a time: show what is open.
+        days = sorted({str(s["starts_at_local"])[:10] for s in slots})
+        if len(days) > 1 and draft.operation == "BOOK":
+            offset = self.state.offer_offset
+            shown_days = days[offset : offset + SPOKEN_OPTION_LIMIT]
+            day_offers = [Offer(_day_label(day), f"start:{day}") for day in shown_days]
+            if not day_offers:
+                self.state.offer_offset = max(0, offset - SPOKEN_OPTION_LIMIT)
+                return self._ask(
+                    Awaiting.DATE,
+                    "Those are all the matching days. You can name another day or change the time.",
+                    self.state.offered,
+                )
+            more = (
+                " Ask for more options or name another day."
+                if offset + len(day_offers) < len(days)
+                else ""
+            )
+            return self._ask(
+                Awaiting.DATE,
+                f"I have {self._preference(draft)}openings at {self._clinic_name()} on "
+                f"{numbered_options(day_offers)}.{more} Which day would you like?",
+                day_offers,
+            )
+        if not offers:
+            self.state.offer_offset = max(0, self.state.offer_offset - SPOKEN_OPTION_LIMIT)
+            return self._ask(
+                Awaiting.TIME,
+                "Those are all the matching times. You can name a different time or another day.",
+                self.state.offered,
+            )
+        more = (
+            " Ask for more options, name a different time, or try another day."
+            if self.state.offer_offset + len(offers) < len(slots)
+            else ""
+        )
+        spoken = compact_numbered_options(offers)
+        separator = " " if spoken.startswith("on ") else ": "
         return self._ask(
             Awaiting.TIME,
-            f"Which time would you like: {_names([o.label for o in offers])}?",
+            f"I have {self._preference(draft)}openings at {self._clinic_name()}"
+            f"{separator}{spoken}."
+            f"{more} Which time would you like?",
             offers,
         )
+
+    def _clinic_name(self) -> str:
+        clinic = self.clinic or (self.current or {}).get("clinic") or {}
+        return str(clinic.get("name", "that clinic"))
+
+    @staticmethod
+    def _preference(draft: Draft) -> str:
+        """ "morning " for a morning preference; empty when none was stated."""
+        return "" if draft.time_preference == "ANYTIME" else f"{draft.time_preference.lower()} "
 
     def _after_prepare(self, data: Mapping[str, Any]):
         self.state.awaiting = Awaiting.NOTHING
@@ -1512,7 +2414,12 @@ class HybridControllerModel:
             what = (
                 f"moving your appointment from {_clock(local)} on {_day_label(local)} to {target}"
             )
-        return f"I prepared {what}. Please review the details and confirm in the app."
+        why = {
+            "earliest": " That is the earliest opening that fits what you asked for.",
+            "only": " That is the only opening that fits what you asked for.",
+            "clock": " That is the only opening at that time, morning or evening.",
+        }.get(self.auto_pick, "")
+        return f"I prepared {what}.{why} Please review the details and confirm in the app."
 
     def _after_event(self, event: Mapping[str, Any]) -> str:
         """The trusted UI's report. Only a reported commit is ever described as done."""
@@ -1538,6 +2445,90 @@ class HybridControllerModel:
             return f"Your appointment is rescheduled to {target}."
         return f"Your appointment, {target}, is {word}."
 
+    # -- an empty search, explained --------------------------------------------------------------
+
+    def _no_openings_facts(self, draft: Draft):
+        """Where, when, and which of the patient's filters narrowed the empty search."""
+        searched = self._searched
+        where = (self.clinic or (self.current or {}).get("clinic") or {}).get("name", "that clinic")
+        when = _when(draft.new_date) if draft.new_date else _when(draft.start_date, draft.end_date)
+        specialty = draft.specialty if "specialty" in searched else None
+        part_of_day = draft.time_preference.lower() if "time_preference" in searched else None
+        doctor = (draft.doctor_name or "that doctor") if "doctor_id" in searched else None
+        return (
+            where,
+            when,
+            {
+                "specialty": specialty,
+                "part_of_day": part_of_day,
+                "doctor": doctor,
+            },
+        )
+
+    def _explain_no_openings(self, draft: Draft):
+        """No openings: say which of three things that means. A filter is never dropped to make
+        the search succeed; the patient is told what excluded the openings and chooses."""
+        if "start_date" not in self._searched:
+            where, when, _ = self._no_openings_facts(draft)
+            return self._ask(
+                Awaiting.DATE, f"I don't see any openings at {where}{when}. Would another day work?"
+            )
+        where, when, filters = self._no_openings_facts(draft)
+        specialty = filters["specialty"]
+        if specialty and self.clinic is not None:
+            listed = specialties_listed(self.clinic)
+            if listed and not any(same_specialty(specialty, name) for name in listed):
+                return self._ask(Awaiting.SPECIALTY, no_such_specialty(where, specialty, listed))
+        if any(name in self._searched for name in FILTER_ARGUMENTS):
+            self._diagnosis = "unfiltered"  # What does the clinic have open, whatever was asked?
+            everything = {k: v for k, v in self._searched.items() if k not in FILTER_ARGUMENTS}
+            return self._emit("search_appointment_availability", everything)
+        return self._look_ahead()
+
+    def _look_ahead(self):
+        """Nothing is open then: search the next days from the clinic's today (or from the day
+        asked for, if that is further off than one search can span), with the filters kept."""
+        self._diagnosis = "ahead"
+        wanted = date.fromisoformat(str(self._searched["start_date"]))
+        today = self.local_today or self._today()
+        first = today if 0 <= (wanted - today).days < LOOK_AHEAD_DAYS else wanted
+        last = first + timedelta(days=LOOK_AHEAD_DAYS - 1)
+        return self._emit(
+            "search_appointment_availability",
+            {**self._searched, "start_date": first.isoformat(), "end_date": last.isoformat()},
+        )
+
+    def _diagnose(self, result: Mapping[str, Any]):
+        stage, self._diagnosis = self._diagnosis, None
+        draft = self.state.draft
+        assert draft is not None
+        code = (result.get("error") or {}).get("code")
+        if not result.get("ok") and code != "NO_AVAILABILITY":
+            return self._failed("search_appointment_availability", result)
+        slots = list((result.get("data") or {}).get("slots") or []) if result.get("ok") else []
+        where, when, filters = self._no_openings_facts(draft)
+        if stage == "unfiltered":
+            if not slots:
+                return self._look_ahead()  # Nothing open at all that day.
+            wanted = filters["specialty"]
+            awaiting = (
+                Awaiting.SPECIALTY
+                if wanted
+                else Awaiting.DOCTOR
+                if filters["doctor"] and not filters["part_of_day"]
+                else Awaiting.DATE
+            )
+            return self._ask(
+                awaiting,
+                filtered_out(where, when, **filters, open_specialties=specialties_open(slots)),
+            )
+        if slots:
+            return self._ask(Awaiting.DATE, later_days(where, when, next_days(slots), **filters))
+        return self._ask(
+            Awaiting.SPECIALTY if filters["specialty"] else Awaiting.CLINIC,
+            nothing_ahead(where, when, **filters),
+        )
+
     def _failed(self, tool: str, result: Mapping[str, Any]):
         error = result.get("error") or {}
         code = error.get("code")
@@ -1561,7 +2552,9 @@ class HybridControllerModel:
         if code == "NO_RESULTS" and tool == "search_clinic_directory" and draft is not None:
             if draft.doctor_name and not self._probing:
                 self._probing = True
-                return self._emit("search_clinic_directory", {"clinic_name": draft.clinic_name})
+                return self._emit(
+                    "search_clinic_directory", {"clinic_name": search_name(draft.clinic_name)}
+                )
             self._probing = False
             named = f" called {draft.clinic_name}" if draft.clinic_name else ""
             self.state.draft = draft.model_copy(update={"clinic_name": None, "doctor_name": None})
@@ -1569,15 +2562,7 @@ class HybridControllerModel:
                 Awaiting.CLINIC, f"I couldn't find a clinic{named}. Which clinic would you like?"
             )
         if code == "NO_AVAILABILITY" and draft is not None:
-            where = (self.clinic or (self.current or {}).get("clinic") or {}).get(
-                "name", "that clinic"
-            )
-            when = draft.new_date or draft.start_date
-            on = f" on {_day_label(when.isoformat())}" if when else ""
-            return self._ask(
-                Awaiting.DATE,
-                f"I don't see any openings at {where}{on}. Would another day work?",
-            )
+            return self._explain_no_openings(draft)
         if code in ("AUTH_REQUIRED", "SESSION_EXPIRED", "FORBIDDEN"):
             self.state.prepared = None
             return self._say(SIGN_IN_NOTICE)

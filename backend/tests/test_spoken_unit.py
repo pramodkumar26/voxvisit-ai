@@ -208,3 +208,8 @@ def test_a_time_is_not_taken_from_a_date_or_a_name() -> None:
     assert clock_mentions("at 17th Avenue") == []
     assert clock_mentions("Pine Clinic at 5th and Main") == []
     assert stated_clocks("book 2 pm and 3:30 pm") == {840, 930}
+
+
+def test_a_numeral_hour_followed_by_oclock_is_a_bare_hour() -> None:
+    assert normalize_spoken("the 3 o'clock") == "the 3:00"
+    assert normalize_spoken("the three o'clock") == "the 3:00"

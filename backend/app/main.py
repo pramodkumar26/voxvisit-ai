@@ -11,6 +11,8 @@ from app.api.routes.appointment_actions import confirm_router, prepare_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.fhir_like import router as fhir_like_router
 from app.api.routes.health import router as health_router
+from app.api.routes.review_handoff import router as review_handoff_router
+from app.api.routes.review_page import router as review_page_router
 from app.api.routes.scheduling import router as scheduling_router
 from app.auth.dependencies import CSRF_HEADER
 from app.auth.passwords import create_hasher
@@ -69,6 +71,8 @@ def create_app(
     application.include_router(scheduling_router)
     application.include_router(prepare_router)
     application.include_router(confirm_router)
+    application.include_router(review_handoff_router)
+    application.include_router(review_page_router)
     application.include_router(fhir_like_router)
     return application
 

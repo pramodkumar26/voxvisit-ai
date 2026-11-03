@@ -308,6 +308,22 @@ class Backend:
         def words(value):
             return value.casefold().replace(".", " ").split()
 
+        if args.get("browse"):
+            return ok(
+                {
+                    "clinics": [dict(c, city="Boulder") for c in self.clinics.values()],
+                    "doctors": [
+                        {
+                            "doctor_id": d["doctor_id"],
+                            "display_name": d["display_name"],
+                            "specialty": "Family Medicine",
+                            "clinics": [dict(self.clinics[d["clinic"]])],
+                        }
+                        for d in self.doctors.values()
+                    ],
+                    "next_cursor": None,
+                }
+            )
         clinics = [
             c
             for c in self.clinics.values()
@@ -336,14 +352,34 @@ class Backend:
                 )
         if not clinics:
             return fail("NO_RESULTS")
-        if len(clinics) > 1 and not any(
-            c["name"].casefold() == args["clinic_name"].casefold() for c in clinics
+        if (
+            len(clinics) > 1
+            and args.get("clinic_name")
+            and not any(c["name"].casefold() == args["clinic_name"].casefold() for c in clinics)
         ):
             return fail(
                 "AMBIGUOUS_MATCH",
                 choices=[{"clinic_id": c["clinic_id"], "name": c["name"]} for c in clinics],
             )
-        return ok({"clinics": clinics, "doctors": doctors})
+        if not doctors and args.get("clinic_name"):
+            ids = {c["clinic_id"] for c in clinics}
+            doctors = [d for d in self.doctors.values() if d["clinic"] in ids]
+        return ok(
+            {
+                "clinics": [dict(c, city="Boulder") for c in clinics],
+                "doctors": [
+                    dict(
+                        d,
+                        specialty="Family Medicine",
+                        clinics=[
+                            {"clinic_id": d["clinic"], "name": self.clinics[d["clinic"]]["name"]}
+                        ],
+                    )
+                    for d in doctors
+                ],
+                "next_cursor": None,
+            }
+        )
 
     def search_appointment_availability(self, args, principal):
         found = [
@@ -1100,7 +1136,9 @@ def test_no_availability_offers_another_day_and_the_next_date_is_used() -> None:
     first = session.respond("Book at Pine Clinic on November 20.")
     second = session.respond("How about November 17?")
 
-    assert "Would another day work?" in first.text and "November 20, 2026" in first.text
+    # The empty day is named, and the days offered are ones the backend really lists.
+    assert "November 20, 2026" in first.text and "Tuesday, November 17" in first.text
+    assert "Which day would you like?" in first.text
     assert "I prepared booking 10:00 AM" in second.text
 
 
@@ -1564,7 +1602,7 @@ def test_quarter_past_two_is_asked_about_and_the_answer_settles_it(answer) -> No
     asked = session.respond("Book Pine Clinic on November seventeenth at quarter past two.")
 
     assert "Do you mean 2:15 AM or 2:15 PM?" in asked.text
-    assert backend.prepared == [] and availability_calls(backend) == []  # Nothing was guessed.
+    assert backend.prepared == []  # Both readings are open: nothing was guessed.
     done = session.respond(answer)
     assert backend.prepared == [{"action": "BOOK", "slot_id": "s1"}]
     assert "2:15 PM" in done.text
@@ -1588,9 +1626,79 @@ def test_a_bare_hour_with_no_am_or_pm_is_never_guessed() -> None:
     asked = session.respond("Book Pine Clinic on November seventeenth at ten.")
 
     assert "Do you mean 10:00 AM or 10:00 PM?" in asked.text
-    assert backend.prepared == [] and availability_calls(backend) == []
+    assert backend.prepared == []
     session.respond("PM")
     assert backend.prepared == [{"action": "BOOK", "slot_id": "s1"}]
+
+
+def test_a_long_availability_list_speaks_three_grounded_options_at_a_time() -> None:
+    backend = pine_day(9, 9.5, 10, 10.5, 11, 11.5)
+    session, model, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", start_date=NOV17, end_date=NOV17),
+    )
+
+    first = session.respond("Book Pine Clinic on November 17.")
+
+    assert all(time in first.text for time in ("9:00 AM", "9:30 AM", "10:00 AM"))
+    assert "Pine Clinic" in first.text and "Dr. Anita Rao" in first.text
+    assert "Tuesday, November 17, 2026" in first.text
+    assert all(time not in first.text for time in ("10:30 AM", "11:00 AM", "11:30 AM"))
+    assert [offer.key for offer in model.state.offered] == ["s0", "s1", "s2"]
+    assert "more options" in first.text and backend.prepared == []
+
+
+def test_asking_for_more_rechecks_availability_and_speaks_the_next_three() -> None:
+    backend = pine_day(9, 9.5, 10, 10.5, 11, 11.5)
+    session, model, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", start_date=NOV17, end_date=NOV17),
+        intent(option_number=2),
+    )
+    session.respond("Book Pine Clinic on November 17.")
+
+    more = session.respond("Show me more options.")
+
+    assert all(time in more.text for time in ("10:30 AM", "11:00 AM", "11:30 AM"))
+    assert "9:00 AM" not in more.text
+    assert [offer.key for offer in model.state.offered] == ["s3", "s4", "s5"]
+    assert len(availability_calls(backend)) == 2
+    chosen = session.respond("The second option.")
+    assert chosen.awaiting_confirmation
+    assert backend.prepared == [{"action": "BOOK", "slot_id": "s4"}]
+
+
+def test_a_hidden_fourth_option_cannot_be_selected_from_the_first_spoken_page() -> None:
+    backend = pine_day(9, 9.5, 10, 10.5, 11)
+    session, model, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", start_date=NOV17, end_date=NOV17),
+        intent(option_number=4),
+    )
+    session.respond("Book Pine Clinic on November 17.")
+
+    reply = session.respond("The fourth option.")
+
+    assert backend.prepared == []
+    assert [offer.key for offer in model.state.offered] == ["s0", "s1", "s2"]
+    assert "Which time would you like?" in reply.text
+
+
+def test_a_different_time_preference_restarts_the_spoken_options_from_matching_results() -> None:
+    backend = pine_day(9, 9.5, 10, 13, 14, 15)
+    session, model, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", start_date=NOV17, end_date=NOV17),
+        intent(time_preference="AFTERNOON"),
+    )
+    session.respond("Book Pine Clinic on November 17.")
+
+    reply = session.respond("Show me afternoon times instead.")
+
+    assert all(time in reply.text for time in ("1:00 PM", "2:00 PM", "3:00 PM"))
+    assert "9:00 AM" not in reply.text
+    assert model.state.offer_offset == 0 and backend.prepared == []
+    assert availability_calls(backend)[-1]["time_preference"] == "AFTERNOON"
 
 
 def test_tomorrow_afternoon_means_the_clinics_tomorrow_not_utc_tomorrow() -> None:
@@ -1618,6 +1726,45 @@ def test_tomorrow_at_a_clinic_behind_utc_is_still_that_clinics_tomorrow() -> Non
     session.respond("Book Pine Clinic tomorrow.")
 
     assert availability_calls(backend)[0]["start_date"] == "2026-11-02"  # Not Nov 3.
+
+
+def test_tomorrow_stays_relative_until_the_clinic_timezone_is_known() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", date(2026, 11, 2), 14)
+    late = datetime(2026, 11, 2, 3, 0, tzinfo=UTC)  # Nov 1 at the clinic.
+    session, model, _ = talk(
+        backend,
+        book(),
+        intent(clinic_name="Pine Clinic"),
+        now=late,
+    )
+
+    first = session.respond("Book an appointment tomorrow afternoon.")
+
+    assert "for tomorrow" in first.text
+    assert "November 2" not in first.text and "November 3" not in first.text
+    assert model.state.draft.start_spec == "rel:tomorrow"
+    session.respond("Pine Clinic.")
+    assert availability_calls(backend)[0]["start_date"] == "2026-11-02"
+
+
+@pytest.mark.parametrize(
+    ("now", "clinic_tomorrow", "offset"),
+    [
+        (datetime(2027, 3, 15, 6, 30, tzinfo=UTC), date(2027, 3, 16), "-06:00"),
+        (datetime(2027, 11, 8, 6, 30, tzinfo=UTC), date(2027, 11, 8), "-07:00"),
+    ],
+)
+def test_tomorrow_uses_the_clinic_date_across_daylight_saving_transitions(
+    now, clinic_tomorrow, offset
+) -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", clinic_tomorrow, 14, offset=offset)
+    session, _, _ = talk(backend, book(clinic_name="Pine Clinic"), now=now)
+
+    session.respond("Book Pine Clinic tomorrow afternoon.")
+
+    assert availability_calls(backend)[0]["start_date"] == clinic_tomorrow.isoformat()
 
 
 def test_a_date_with_no_year_is_its_next_occurrence_on_the_clinics_calendar() -> None:
@@ -1986,3 +2133,459 @@ def test_a_request_to_be_fitted_in_is_understood_without_the_model_too() -> None
 
     assert model.state.draft.operation == "BOOK" and "Which clinic" in reply.text
     assert backend.calls == []
+
+
+# --- natural scheduling conversations ------------------------------------------------------------
+
+MONDAY = date(2026, 11, 9)  # TODAY is Monday, 2026-11-02.
+
+
+def directory_calls(backend):
+    return [args for tool, args, _ in backend.calls if tool == "search_clinic_directory"]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Which clinics are available?",
+        "what clinics do you have",
+        "Can you list the clinics?",
+        "Show me the locations",
+        "Are there any other clinics?",
+    ],
+)
+def test_asking_which_clinics_exist_lists_them_and_keeps_the_booking_going(question) -> None:
+    backend = pine_day(9, 10)
+    session, model, _ = talk(backend, book(start_date=NOV17, end_date=NOV17), intent(), book())
+    first = session.respond("I need an appointment on November 17.")
+    assert "Which clinic would you like?" in first.text
+
+    reply = session.respond(question)
+
+    assert "Pine Clinic" in reply.text and "Two Rivers Clinic" in reply.text
+    assert reply.text.endswith("Which clinic would you like?")  # Asked again, not dropped.
+    assert directory_calls(backend) == [{"browse": True}]
+    assert model.state.draft.start_date == NOV17 and model.state.awaiting == Awaiting.CLINIC
+    assert backend.prepared == []
+
+
+def test_the_clinic_question_is_answered_without_the_model_and_the_booking_then_continues() -> None:
+    backend = pine_day(9)
+    session, _, reader = talk(
+        backend, book(start_date=NOV17, end_date=NOV17), intent(clinic_name="Pine Clinic")
+    )
+    session.respond("Book me something on November 17.")
+    session.respond("Which clinics are available?")
+    assert len(reader.seen) == 1  # The question itself was read by rules.
+
+    reply = session.respond("Pine Clinic please")
+
+    assert len(backend.prepared) == 1 and reply.awaiting_confirmation
+
+
+def test_a_clinic_question_with_a_date_in_it_keeps_the_date_for_the_booking() -> None:
+    backend = pine_day(9)
+    session, model, _ = talk(backend, book(start_date=NOV17, end_date=NOV17))
+
+    reply = session.respond("Which clinics are open on November 17? I need an appointment.")
+
+    assert "Pine Clinic" in reply.text and "Which clinic would you like?" in reply.text
+    assert model.state.draft.start_date == NOV17
+
+
+def test_a_clinic_question_does_not_disturb_a_review_that_is_waiting() -> None:
+    session, model, backend = prepared_session()
+    prepared = model.state.prepared
+
+    reply = session.respond("Which clinics are available?")
+
+    assert "Pine Clinic" in reply.text and "Confirm in the app" in reply.text
+    assert model.state.prepared == prepared and backend.discarded == []
+    assert reply.awaiting_confirmation
+
+
+def test_a_clinic_question_with_nothing_in_progress_offers_to_book() -> None:
+    backend = Backend()
+    session, model, _ = talk(backend)
+
+    reply = session.respond("What clinics do you have?")
+
+    assert "Pine Clinic" in reply.text and "book, move, or cancel" in reply.text
+    assert model.state.draft is None
+
+
+def test_a_doctor_question_lists_the_doctors_of_the_clinic_being_booked() -> None:
+    backend = Backend()
+    session, model, _ = talk(backend, book(clinic_name="Pine Clinic"))
+    session.respond("Book at Pine Clinic.")
+
+    reply = session.respond("Which doctors are there?")
+
+    assert "Dr. Anita Rao" in reply.text and "Dr. Ivo Reed" not in reply.text
+    assert "Which date would you like?" in reply.text
+    assert model.state.draft.clinic_name == "Pine Clinic"
+
+
+def test_a_failed_directory_lookup_is_said_plainly_and_the_booking_stays() -> None:
+    backend = Backend()
+    backend.fail["search_clinic_directory"] = fail("DEPENDENCY_UNAVAILABLE")
+    session, model, _ = talk(backend, book(start_date=NOV17, end_date=NOV17))
+    session.respond("Book me something on November 17.")
+
+    reply = session.respond("Which clinics are available?")
+
+    assert (
+        "couldn't look up the list" in reply.text and "Which clinic would you like?" in reply.text
+    )
+    assert model.state.draft.start_date == NOV17
+
+
+def test_an_unrelated_question_still_ends_the_request_but_a_clinic_question_does_not() -> None:
+    backend = pine_day(9)
+    session, model, _ = talk(backend, book(), intent(message_type="OFF_TOPIC"))
+    session.respond("I'd like to book.")
+    session.respond("Which clinics are available?")
+    assert model.state.draft is not None
+
+    session.respond("What time does the pharmacy close?")
+
+    assert model.state.draft is None
+
+
+def test_monday_morning_is_not_turned_into_a_time_without_asking() -> None:
+    backend = pine_day(9, 9.5, 11, day=MONDAY)
+    session, model, _ = talk(
+        backend,
+        book(
+            clinic_name="Pine Clinic",
+            start_date=MONDAY,
+            end_date=MONDAY,
+            time_preference="MORNING",
+            selection="ANY",  # What the model may say about a plain "morning".
+        ),
+    )
+
+    reply = session.respond("I need an appointment at Pine Clinic Monday morning.")
+
+    assert backend.prepared == []
+    assert "9:00 AM" in reply.text and "9:30 AM" in reply.text and "11:00 AM" in reply.text
+    assert "Which time would you like?" in reply.text and "morning" in reply.text
+    assert model.state.awaiting == Awaiting.TIME
+
+
+def test_the_time_chosen_from_the_morning_options_is_then_prepared() -> None:
+    backend = pine_day(9, 9.5, 11, day=MONDAY)
+    session, _, _ = talk(
+        backend,
+        book(
+            clinic_name="Pine Clinic",
+            start_date=MONDAY,
+            end_date=MONDAY,
+            time_preference="MORNING",
+        ),
+        intent(time="9:30 AM", selection="SPECIFIC_TIME"),
+    )
+    session.respond("An appointment at Pine Clinic Monday morning.")
+
+    reply = session.respond("9:30 please")
+
+    assert backend.prepared == [{"action": "BOOK", "slot_id": "s1"}]
+    assert "9:30 AM" in reply.text and "earliest" not in reply.text
+
+
+@pytest.mark.parametrize("phrase", ["the earliest you have", "the first available"])
+def test_leaving_the_time_to_the_earliest_picks_the_earliest_and_says_so(phrase) -> None:
+    backend = pine_day(10, 9, 11)
+    session, _, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", start_date=NOV17, end_date=NOV17, selection="EARLIEST"),
+    )
+
+    reply = session.respond(f"Book Pine Clinic on November 17, {phrase}.")
+
+    assert backend.prepared == [{"action": "BOOK", "slot_id": "s1"}]  # 9:00 is the earliest.
+    assert "earliest opening that fits" in reply.text
+
+
+@pytest.mark.parametrize("phrase", ["any time is fine", "whenever works", "I don't care what time"])
+def test_not_caring_which_time_is_not_a_choice_made_for_the_patient(phrase) -> None:
+    backend = pine_day(10, 9, 11)
+    session, _, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", start_date=NOV17, end_date=NOV17, selection="ANY"),
+    )
+
+    reply = session.respond(f"Book Pine Clinic on November 17, {phrase}.")
+
+    assert backend.prepared == []  # Several openings fit: the patient is asked, nothing is chosen.
+    assert "Which time" in reply.text or "9:00 AM" in reply.text
+
+
+def test_two_doctors_free_at_the_same_earliest_time_are_a_question_not_a_choice() -> None:
+    backend = Backend()
+    backend.slot("a", "c-pine", "d-rao", NOV17, 9)
+    backend.slot("b", "c-pine", "d-kim", NOV17, 9)
+    backend.slot("c", "c-pine", "d-rao", NOV17, 11)
+    session, _, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", start_date=NOV17, end_date=NOV17, selection="EARLIEST"),
+    )
+
+    reply = session.respond("Book Pine Clinic on November 17, the earliest available.")
+
+    assert backend.prepared == [] and "earliest" in reply.text and "Which" in reply.text
+
+
+def test_a_next_monday_is_not_taken_as_asking_for_the_earliest_time() -> None:
+    backend = pine_day(9, 10, day=date(2026, 11, 9))
+    session, _, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", selection="EARLIEST"),  # "next" fooled the model.
+    )
+
+    reply = session.respond("Book Pine Clinic next Monday.")
+
+    assert backend.prepared == [] and "Which time would you like?" in reply.text
+
+
+def test_a_single_opening_is_prepared_and_described_as_the_only_one() -> None:
+    backend = pine_day(9, day=MONDAY)
+    session, _, _ = talk(
+        backend,
+        book(
+            clinic_name="Pine Clinic", start_date=MONDAY, end_date=MONDAY, time_preference="MORNING"
+        ),
+    )
+
+    reply = session.respond("I need an appointment at Pine Clinic Monday morning please.")
+
+    assert len(backend.prepared) == 1 and "only opening" in reply.text
+
+
+@pytest.mark.parametrize("phrase", ["any doctor", "any doctor is fine", "doesn't matter who"])
+def test_any_doctor_means_no_doctor_is_searched_for(phrase) -> None:
+    backend = pine_day(9, day=NOV17)
+    session, _, _ = talk(
+        backend,
+        book(
+            clinic_name="Pine Clinic",
+            doctor_name="any doctor",  # A model may copy the words as if they were a name.
+            start_date=NOV17,
+            end_date=NOV17,
+            selection="EARLIEST",
+        ),
+    )
+
+    reply = session.respond(f"Book Pine Clinic on November 17, {phrase}, the earliest.")
+
+    assert directory_calls(backend) == [{"clinic_name": "Pine Clinic"}]
+    assert "availability" not in reply.text and len(backend.prepared) == 1
+
+
+def test_any_doctor_answers_the_question_which_doctor() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", NOV17, 9)
+    backend.slot("s2", "c-pine", "d-kim", NOV17, 10)
+    session, model, _ = talk(
+        backend,
+        book(clinic_name="Pine Clinic", doctor_name="Lee", start_date=NOV17, end_date=NOV17),
+        intent(doctor_name="any"),
+        intent(selection="EARLIEST"),
+    )
+    first = session.respond("Book Pine Clinic with Dr. Lee on November 17.")
+    assert "Which doctor do you mean" in first.text
+
+    reply = session.respond("any doctor")
+    assert "Which time would you like?" in reply.text or backend.prepared
+
+    assert model.state.draft.doctor_name is None
+    assert "doctor_id" not in availability_calls(backend)[-1]
+
+
+def test_sometime_next_week_searches_the_whole_week_and_asks_which_day() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", date(2026, 11, 10), 9)
+    backend.slot("s2", "c-pine", "d-rao", date(2026, 11, 12), 14)
+    backend.slot("s3", "c-pine", "d-rao", date(2026, 11, 12), 15)
+    backend.slot("s4", "c-pine", "d-rao", date(2026, 11, 16), 9)  # The week after: not offered.
+    session, model, _ = talk(backend, book(clinic_name="Pine Clinic"))
+
+    reply = session.respond("I need an appointment sometime next week at Pine Clinic.")
+
+    assert availability_calls(backend)[0]["start_date"] == "2026-11-09"
+    assert availability_calls(backend)[0]["end_date"] == "2026-11-15"
+    assert "Tuesday, November 10" in reply.text and "Thursday, November 12" in reply.text
+    assert "November 16" not in reply.text and "Which day would you like?" in reply.text
+    assert backend.prepared == [] and model.state.awaiting == Awaiting.DATE
+
+
+def test_the_day_chosen_from_a_week_is_searched_and_then_the_time_is_asked() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", date(2026, 11, 10), 9)
+    backend.slot("s2", "c-pine", "d-rao", date(2026, 11, 12), 14)
+    backend.slot("s3", "c-pine", "d-rao", date(2026, 11, 12), 15)
+    session, _, _ = talk(backend, book(clinic_name="Pine Clinic"), intent(), intent(time="3 PM"))
+    session.respond("I need an appointment sometime next week at Pine Clinic.")
+
+    day = session.respond("Thursday")
+    assert availability_calls(backend)[-1]["start_date"] == "2026-11-12"
+    assert "2:00 PM" in day.text and "3:00 PM" in day.text and "Which time" in day.text
+
+    done = session.respond("3 PM")
+    assert backend.prepared == [{"action": "BOOK", "slot_id": "s3"}]
+    assert done.awaiting_confirmation
+
+
+def test_a_weekday_of_next_week_is_that_day_and_not_this_weeks() -> None:
+    backend = pine_day(9, 10, day=date(2026, 11, 10))
+    session, _, _ = talk(backend, book(clinic_name="Pine Clinic"))
+
+    session.respond("I need an appointment at Pine Clinic, Tuesday next week.")
+
+    assert availability_calls(backend)[0]["start_date"] == "2026-11-10"
+    assert availability_calls(backend)[0]["end_date"] == "2026-11-10"
+
+
+def test_next_week_with_no_openings_asks_for_another_time_and_invents_none() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", date(2026, 11, 24), 9)
+    session, _, _ = talk(backend, book(clinic_name="Pine Clinic"))
+
+    reply = session.respond("I need an appointment next week at Pine Clinic.")
+
+    assert "don't see any openings" in reply.text and backend.prepared == []
+
+
+def test_a_request_with_only_a_time_of_day_asks_for_the_clinic_and_remembers_the_rest() -> None:
+    session, _, _ = talk(Backend(), book(time_preference="MORNING"))
+
+    reply = session.respond("I'd like a morning appointment on November 17.")
+
+    assert "in the morning" in reply.text and "Which clinic would you like?" in reply.text
+    assert "which clinics are available" in reply.text and reply.text.endswith("?")
+
+
+def test_a_missing_date_is_asked_with_what_is_already_known() -> None:
+    session, _, _ = talk(Backend(), book(clinic_name="Pine Clinic", doctor_name="Rao"))
+
+    reply = session.respond("I want to see Dr. Rao at Pine Clinic.")
+
+    assert "at Pine Clinic with Rao" in reply.text and "Which date would you like?" in reply.text
+
+
+def test_a_correction_after_the_options_changes_the_day_and_asks_again() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", MONDAY, 9)
+    backend.slot("s2", "c-pine", "d-rao", MONDAY, 10)
+    backend.slot("s3", "c-pine", "d-rao", NOV17, 9)
+    backend.slot("s4", "c-pine", "d-rao", NOV17, 10)
+    session, _, _ = talk(
+        backend,
+        book(
+            clinic_name="Pine Clinic",
+            start_date=MONDAY,
+            end_date=MONDAY,
+            time_preference="MORNING",
+        ),
+        intent(start_date=NOV17, end_date=NOV17),
+    )
+    first = session.respond("I need an appointment at Pine Clinic Monday morning.")
+    assert "Which time would you like?" in first.text
+
+    again = session.respond("Actually, make it November 17.")
+
+    assert availability_calls(backend)[-1]["start_date"] == "2026-11-17"
+    assert "Which time would you like?" in again.text and backend.prepared == []
+
+
+def test_a_bare_time_said_to_which_time_is_the_offered_time_that_reads_that_way() -> None:
+    backend = pine_day(9, 9.5, 11, day=MONDAY)
+    session, _, _ = talk(
+        backend,
+        book(
+            clinic_name="Pine Clinic",
+            start_date=MONDAY,
+            end_date=MONDAY,
+            time_preference="MORNING",
+        ),
+        intent(),  # The model finds no time in "9:30 please".
+    )
+    session.respond("I need an appointment at Pine Clinic Monday morning.")
+
+    reply = session.respond("9:30 please")
+
+    assert "AM or" not in reply.text
+    assert backend.prepared == [{"action": "BOOK", "slot_id": "s1"}]
+
+
+def test_a_bare_time_that_fits_two_offered_times_is_still_asked_about() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", MONDAY, 9, 30)
+    backend.slot("s2", "c-pine", "d-rao", MONDAY, 21, 30)
+    session, _, _ = talk(
+        backend, book(clinic_name="Pine Clinic", start_date=MONDAY, end_date=MONDAY), intent()
+    )
+    session.respond("I need an appointment at Pine Clinic on Monday.")
+
+    reply = session.respond("9:30 please")
+
+    assert "Do you mean 9:30 AM or 9:30 PM?" in reply.text and backend.prepared == []
+
+
+def test_the_question_asked_again_after_a_list_does_not_repeat_what_was_just_said() -> None:
+    session, _, _ = talk(Backend(), book(start_date=NOV17, end_date=NOV17))
+    session.respond("I need an appointment on November 17.")
+
+    reply = session.respond("Which clinics are available?")
+
+    assert reply.text.endswith(" Which clinic would you like?")
+    assert "So far" not in reply.text and "You can ask me" not in reply.text
+
+
+def test_no_openings_in_a_week_say_the_whole_week_not_its_first_day() -> None:
+    backend = Backend()
+    backend.slot("s1", "c-pine", "d-rao", date(2026, 11, 24), 9)
+    session, _, _ = talk(backend, book(clinic_name="Pine Clinic"))
+
+    reply = session.respond("I need an appointment sometime next week at Pine Clinic.")
+
+    assert "from Monday, November 9, 2026 to Sunday, November 15, 2026" in reply.text
+
+
+def test_a_bare_time_with_only_one_reading_open_is_that_reading_and_the_review_says_so() -> None:
+    backend = pine_day(9.5, 11)  # 9:30 AM is open; there is no 9:30 PM.
+    session, _, _ = talk(backend, book(clinic_name="Pine Clinic"), intent())
+
+    reply = session.respond("Book Pine Clinic on November seventeenth at nine thirty.")
+
+    assert backend.prepared == [{"action": "BOOK", "slot_id": "s0"}]
+    assert "9:30 AM" in reply.text and "only opening at that time" in reply.text
+
+
+def test_a_bare_time_with_neither_reading_open_is_still_asked_about_and_nothing_is_prepared() -> (
+    None
+):
+    backend = pine_day(10, 11)
+    session, _, _ = talk(backend, book(clinic_name="Pine Clinic"), intent())
+
+    reply = session.respond("Book Pine Clinic on November seventeenth at nine thirty.")
+
+    assert "Do you mean 9:30 AM or 9:30 PM?" in reply.text and backend.prepared == []
+
+
+def test_a_doctor_name_that_is_the_rest_of_the_clinics_name_is_not_a_doctor() -> None:
+    backend = pine_day(9, day=NOV17)
+    backend.slots = [("s0", "c-rivers", "d-rivers", "2026-11-17T09:00:00-07:00")]
+    session, model, _ = talk(
+        backend,
+        book(clinic_name="Two", doctor_name="Rivers", start_date=NOV17, end_date=NOV17),
+    )
+
+    reply = session.respond("Book Two Rivers Clinic on November 17.")
+
+    assert "couldn't find a doctor" not in reply.text
+    assert (
+        model.state.draft.clinic_name == "Two Rivers Clinic"
+        and model.state.draft.doctor_name is None
+    )
+    assert backend.prepared == [{"action": "BOOK", "slot_id": "s0"}]

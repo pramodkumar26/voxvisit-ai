@@ -1,6 +1,6 @@
 import os
 from collections.abc import Callable, Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +16,7 @@ from database_support import (
 from fastapi.testclient import TestClient
 from sqlalchemy import Connection, Engine, text
 
+from app.evaluation.graph_store import CheckpointStore
 from app.seed.loader import seed_database
 
 
@@ -97,3 +98,13 @@ def auth_env(auth_database: SimpleNamespace) -> Iterator[SimpleNamespace]:
             pin=auth_database.pin,
             password=auth_database.password,
         )
+
+
+@pytest.fixture
+def graph_store(auth_env: SimpleNamespace) -> Iterator[CheckpointStore]:
+    store = CheckpointStore(auth_env.engine.url, retention=timedelta(hours=12)).open()
+    store.delete_all()
+    try:
+        yield store
+    finally:
+        store.close()

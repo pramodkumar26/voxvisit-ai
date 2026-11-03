@@ -147,6 +147,8 @@ class LlmConfig:
     max_message_chars: int = 2000  # A longer reply is cut before it is shown or classified.
     max_result_chars: int = 12000  # A longer tool result is cut before it reaches the model.
     allow_remote: bool = False
+    think: bool | None = None  # Reasoning mode for models that have one; None leaves the default.
+    keep_alive: str | None = None  # How long the server keeps the model loaded, e.g. "30m".
 
     def __post_init__(self) -> None:
         host = urlparse(self.base_url).hostname
@@ -204,6 +206,31 @@ class CallRecord:
     prompt_tokens: int | None = None
     output_tokens: int | None = None
     server_ms: float | None = None  # The server's own measurement of the whole call.
+    load_ms: float | None = None  # Loading the model into memory (non-zero only when it was cold).
+    prefill_ms: float | None = None  # Reading the prompt.
+    decode_ms: float | None = None  # Writing the reply.
+
+
+def record_of(duration_ms: float, outcome: str, body: Mapping[str, Any] | None) -> CallRecord:
+    """A call record from the server's reply, with its own timings when it gave them."""
+    body = body or {}
+
+    def count(name: str) -> int | None:
+        return body[name] if isinstance(body.get(name), int) else None
+
+    def millis(name: str) -> float | None:
+        return body[name] / 1e6 if isinstance(body.get(name), int) else None
+
+    return CallRecord(
+        duration_ms=duration_ms,
+        outcome=outcome,
+        prompt_tokens=count("prompt_eval_count"),
+        output_tokens=count("eval_count"),
+        server_ms=millis("total_duration"),
+        load_ms=millis("load_duration"),
+        prefill_ms=millis("prompt_eval_duration"),
+        decode_ms=millis("eval_duration"),
+    )
 
 
 @dataclass

@@ -62,6 +62,8 @@ npm-debug.log*
 # --- Evaluation outputs that hold raw conversation text (synthetic, but never published) ---
 # Local-only working files: benchmark transcripts, review sheets and run logs.
 .local/
+# Temporary context transfer for local AI-assisted work; not project documentation.
+docs/PROJECT_CONTEXT_PROMPT.md
 # If a run is pointed anywhere else, these names are the raw outputs the evaluation tools write.
 # (`docs/benchmark/`, `backend/benchmark-runs/` and `benchmark-runs/` are deliberately NOT
 # ignored: a test requires the tools to refuse them as output directories.)

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Confirm appointment change</title>
+  <link rel="stylesheet" href="/voice-review/app.css">
+</head>
+<body>
+  <main>
+    <h1>Confirm your appointment change</h1>
+    <p id="status" role="status" aria-live="polite">Loading…</p>
+
+    <form id="signin" hidden autocomplete="off">
+      <p>Sign in so we know this is you. Your PIN is sent only to the sign-in service.</p>
+      <label for="patient-code">Patient code</label>
+      <input id="patient-code" name="patient_code" type="text" autocomplete="off"
+             autocapitalize="characters" spellcheck="false" required>
+      <label for="pin">PIN</label>
+      <input id="pin" name="pin" type="password" autocomplete="off" inputmode="numeric" required>
+      <button type="submit">Sign in</button>
+    </form>
+
+    <section id="review" hidden aria-labelledby="review-title">
+      <h2 id="review-title">Review</h2>
+      <dl id="details"></dl>
+      <p id="expiry" class="muted"></p>
+      <div class="actions">
+        <button id="confirm" type="button" class="primary">Confirm</button>
+        <button id="decline" type="button">Decline</button>
+      </div>
+    </section>
+
+    <section id="done" hidden>
+      <h2 id="done-title"></h2>
+      <dl id="done-details"></dl>
+    </section>
+  </main>
+  <script src="/voice-review/app.js"></script>
+</body>
+</html>

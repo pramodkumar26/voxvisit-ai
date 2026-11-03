@@ -181,3 +181,55 @@ class PendingAction(Base):
         Index("ix_pending_actions_session_status", "session_id", "status"),
         Index("ix_pending_actions_expires_at", "expires_at"),
     )
+
+
+class ReviewHandoff(Base):
+    """A single-use ticket that moves a review from the voice session to the patient's browser.
+
+    The ticket is a claim, not a login: it names the patient and the review a voice session
+    prepared, and it can be redeemed only by an authenticated session of that same patient (the
+    browser signs in with its own PIN). Redeeming it prepares an equivalent review in the browser's
+    own session, through the ordinary prepare service, and retires the voice session's. The code
+    itself is never stored, only its SHA-256, so a copy of this table redeems nothing.
+    """
+
+    __tablename__ = "review_handoffs"
+
+    handoff_id: Mapped[uuid_pk]
+    code_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    patient_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("patients.patient_id", ondelete="RESTRICT")
+    )
+    voice_session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("auth_sessions.session_id", ondelete="CASCADE")
+    )
+    voice_pending_action_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("pending_actions.pending_action_id", ondelete="CASCADE")
+    )
+    created_at: Mapped[created_at]
+    expires_at: Mapped[datetime]
+    claimed_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("auth_sessions.session_id", ondelete="CASCADE")
+    )
+    claimed_at: Mapped[datetime | None]
+    browser_pending_action_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("pending_actions.pending_action_id", ondelete="SET NULL")
+    )
+    superseded_at: Mapped[datetime | None]
+
+    __table_args__ = (
+        UniqueConstraint("code_hash"),
+        CheckConstraint(
+            "expires_at > created_at AND expires_at <= created_at + interval '15 minutes'",
+            name="expiry_window_valid",
+        ),
+        CheckConstraint(
+            "(claimed_session_id IS NULL) = (claimed_at IS NULL)", name="claim_is_complete"
+        ),
+        CheckConstraint(
+            "browser_pending_action_id IS NULL OR claimed_at IS NOT NULL",
+            name="review_follows_claim",
+        ),
+        Index("ix_review_handoffs_voice_session_created_at", "voice_session_id", "created_at"),
+        Index("ix_review_handoffs_claimed_session_id", "claimed_session_id"),
+    )

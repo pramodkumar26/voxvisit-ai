@@ -17,6 +17,7 @@ from app.evaluation.conversation_scenarios import (
     SPOKEN_VARIANTS,
 )
 from app.evaluation.environment import EvalEnvironment
+from app.evaluation.scenario import ModelTurn
 
 
 @pytest.fixture
@@ -345,20 +346,20 @@ def test_the_spoken_variants_are_separate_scenarios_over_the_same_worlds() -> No
         assert variant.setup is bases[variant.id.removesuffix("V")].setup
 
 
-def test_a_vague_time_is_asked_about_before_any_search_reaches_the_backend(evaluation) -> None:
+def test_a_vague_time_with_both_readings_open_is_asked_about_and_nothing_is_prepared(
+    evaluation,
+) -> None:
     outcome = run_one(evaluation, next(s for s in SPOKEN_SCENARIOS if s.id == "SP-02"), minimal)
 
     replies = replies_of(outcome)
     assert "Do you mean 2:15 AM or 2:15 PM?" in replies[0]
-    tools = [item["tool"] for item in outcome.result.conversation if item["kind"] == "tool"]
-    assert (
-        tools[0] == "search_clinic_directory"
-    )  # The clinic is looked up; no slot is searched yet.
     first_patient_turn = [
         i for i, x in enumerate(outcome.result.conversation) if x["kind"] == "patient"
     ][1]
+    # The schedule may be read (it is what shows both readings are open); nothing is prepared
+    # until the patient has said which one they mean.
     assert not any(
-        item["kind"] == "tool" and item["tool"] == "search_appointment_availability"
+        item["kind"] == "tool" and item["tool"] == "prepare_appointment_action"
         for item in outcome.result.conversation[:first_patient_turn]
     )
 
@@ -416,3 +417,31 @@ def test_when_the_clocks_go_back_both_one_thirty_slots_are_offered_and_the_chose
             {"c": code},
         ).scalar_one()
     assert booked == datetime(2026, 11, 1, 8, 30, tzinfo=UTC)  # The second 01:30, as chosen.
+
+
+def test_a_clinic_question_in_the_middle_of_a_booking_uses_the_real_directory(evaluation) -> None:
+    base = scenario_named("CV-01")
+    asked = replace(
+        base,
+        timeline=[
+            ModelTurn(
+                follow_ups=("Which clinics are available?", "{clinic_name}."),
+                question_is_unnecessary=False,
+            ),
+            *base.timeline[1:],
+        ],
+    )
+
+    outcome = run_one(evaluation, asked)
+
+    assert outcome.result.failures == [], outcome.result.failures
+    listing = [
+        s
+        for s in steps_of(outcome, "search_clinic_directory")
+        if s["arguments"] == {"browse": True}
+    ]
+    assert len(listing) == 1
+    replies = replies_of(outcome)
+    assert replies[1].startswith("These clinics are available:")
+    assert replies[1].endswith("Which clinic would you like?")
+    assert outcome.result.metrics.ui_confirmations_committed == 1

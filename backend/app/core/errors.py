@@ -126,6 +126,20 @@ class ConflictError(ApplicationError):
         super().__init__(code="CONFLICT", message=message, status_code=409, reason=reason)
 
 
+class HandoffInvalidError(ApplicationError):
+    """One answer for every way a confirmation link can fail, so none can be told from another."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            code="HANDOFF_INVALID",
+            message=(
+                "This confirmation link is not valid, was already used, or has expired. "
+                "Ask the assistant to prepare the change again."
+            ),
+            status_code=404,
+        )
+
+
 class SlotUnavailableError(ApplicationError):
     def __init__(self) -> None:
         super().__init__(

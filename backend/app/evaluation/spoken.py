@@ -248,8 +248,8 @@ def _time_words(text: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(
-        rf"\b({HOUR})\s+o['\u2019]?\s?clock\b",
-        lambda m: clock(hour(m.group(1)), 0),
+        rf"\b(1[0-2]|[1-9]|{HOUR})\s+o['\u2019]?\s?clock\b",
+        lambda m: clock(int(m.group(1)) if m.group(1)[0].isdigit() else hour(m.group(1)), 0),
         text,
         flags=re.IGNORECASE,
     )
@@ -269,10 +269,19 @@ def _time_words(text: str) -> str:
     text = re.sub(rf"\b({HOUR})\s+({CARD})\b", hour_minutes, text, flags=re.IGNORECASE)
 
     # A meridiem, said or implied by a part of the day, on a clock written either way.
-    spoken_hour = rf"(\d{{1,2}}:\d{{2}}|{HOUR})"
+    spoken_hour = rf"(\d{{1,2}}:\d{{2}}|(?<![\d/-])\d{{1,2}}(?![\d/-])|{HOUR})"
+
+    def meridiem_unless_a_date(match: re.Match) -> str:
+        before = match.string[: match.start()]
+        if re.search(
+            rf"\b(?:{'|'.join(m[:3] for m in MONTHS)})[a-z]*\.?\s*$", before, re.IGNORECASE
+        ):
+            return match.group(0)  # "November 12 in the morning": a day of the month, not an hour.
+        return _hour_meridiem(match)
+
     text = re.sub(
         rf"\b{spoken_hour}\s*(?:in the (morning|afternoon|evening)|([ap])\.?m\b\.?)",
-        lambda m: _hour_meridiem(m),
+        meridiem_unless_a_date,
         text,
         flags=re.IGNORECASE,
     )
@@ -315,9 +324,37 @@ _DAY_FIRST = re.compile(
 _DAY_ONLY = re.compile(r"\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b", re.IGNORECASE)
 _RELATIVE = re.compile(
     r"\b(day after tomorrow|tomorrow|today|tonight|(next\s+|this\s+|on\s+)?"
-    r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
+    r"(monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|"
+    r"saturday|sunday))\b",
     re.IGNORECASE,
 )
+_WEEKDAY_ABBREVIATIONS = {
+    "mon": "monday",
+    "tue": "tuesday",
+    "tues": "tuesday",
+    "wed": "wednesday",
+    "thu": "thursday",
+    "thur": "thursday",
+    "thurs": "thursday",
+    "fri": "friday",
+}
+_NUMBER = r"(\d{1,2}|an?|one|two|three|four|five|six|seven|eight|nine|ten)"
+_OFFSET = re.compile(
+    rf"\b(?:in\s+{_NUMBER}\s+(days?|weeks?)|{_NUMBER}\s+(days?|weeks?)\s+(?:from\s+)?"
+    r"(?:now|today))\b",
+    re.IGNORECASE,
+)
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}  # fmt: skip
+
+
+def without_dates(text: str) -> str:
+    """The message with every date written in it blanked out, so the numbers left are not days."""
+    for pattern in (_ISO, _MONTH_FIRST, _DAY_FIRST, _DAY_ONLY):
+        text = pattern.sub(" ", text)
+    return text
 
 
 @dataclass(frozen=True)
@@ -367,6 +404,8 @@ def resolve_spec(spec: str, today: date) -> tuple[str, ...]:
             return ((today + timedelta(days=1)).isoformat(),)
         if words[0] == "dayafter":
             return ((today + timedelta(days=2)).isoformat(),)
+        if words[0] == "plus":
+            return ((today + timedelta(days=int(words[1]))).isoformat(),)
         qualifier, name = (words[0], words[1]) if len(words) == 2 else ("", words[0])
         target = WEEKDAYS.index(name)
         ahead = (target - today.weekday()) % 7 or 7
@@ -408,16 +447,25 @@ def date_mentions(request: str, today: date, anchor: date | None = None) -> list
                 resolved = resolve_spec(spec, today)
                 if resolved:
                     add(match.start(), DateMention(match.start(), resolved[0], spec))
+    for match in _OFFSET.finditer(request):
+        count, unit = (match.group(1), match.group(2)) if match.group(1) else match.groups()[2:4]
+        number = int(count) if count.isdigit() else _NUMBER_WORDS.get(count.casefold(), 0)
+        days = number * (7 if unit.casefold().startswith("week") else 1)
+        if 0 < days <= 60:
+            spec = f"rel:plus:{days}"
+            resolved = resolve_spec(spec, today)
+            add(match.start(), DateMention(match.start(), resolved[0], spec))
+            taken.append(range(match.start(), match.end()))
     for match in _RELATIVE.finditer(request):
+        if any(match.start() in span for span in taken):
+            continue  # "Ten days from today" is one date, not two.
         word = match.group(1).casefold()
         if match.group(3):
+            name = match.group(3).casefold()
+            name = _WEEKDAY_ABBREVIATIONS.get(name, name)
             qualifier = (match.group(2) or "").strip().casefold()
             qualifier = qualifier if qualifier in ("next", "this") else ""
-            spec = (
-                f"rel:{qualifier}:{match.group(3).casefold()}"
-                if qualifier
-                else (f"rel:{match.group(3).casefold()}")
-            )
+            spec = f"rel:{qualifier}:{name}" if qualifier else f"rel:{name}"
         else:
             spec = "rel:" + word.replace("day after tomorrow", "dayafter")
         resolved = resolve_spec(spec, today)
@@ -447,7 +495,7 @@ _CLOCK = re.compile(
     r"|\b(0\d|1[3-9]|2[0-3]):([0-5]\d)\b"  # 4-5: 24-hour, unambiguous
     r"|\b(noon)\b"  # 6
     r"|\b([1-9]|1[0-2]):([0-5]\d)\b(?!\s*[ap]\.?m)"  # 7-8: 12-hour with no am or pm
-    r"|\b(at|after|before|from|until|by)\s+([1-9]|1[0-2])"  # 9-10: a bare hour after a preposition
+    r"|\b(at|after|before|from|until|by|do|try|say|take|go with|make it)\s+([1-9]|1[0-2])"  # 9-10
     r"\b(?![\d:]|\s*(?:[ap]\.?m|st|nd|rd|th))",
     re.IGNORECASE,
 )
